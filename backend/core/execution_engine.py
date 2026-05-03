@@ -4,6 +4,7 @@ This is 100% Python-based, no LLM involved in execution.
 """
 
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -12,6 +13,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict
 
+from core.app_registry import (
+    find_known_app,
+    find_web_shortcut,
+    get_launch_command,
+    strip_fillers,
+)
 from core.intent_parser import IntentType
 from utils.logger import setup_logger
 
@@ -47,6 +54,8 @@ class ExecutionEngine:
         logger.info(f"Executing: {intent_type.value} with params: {params}")
 
         try:
+            if intent_type == IntentType.GREETING:
+                return await self._handle_greeting(intent)
             if intent_type == IntentType.OPEN_APP:
                 return await self._handle_open_app(params.get("target", ""))
             if intent_type == IntentType.OPEN_FILE:
@@ -85,52 +94,97 @@ class ExecutionEngine:
 
     # ==================== HANDLER METHODS ====================
 
-    async def _handle_open_app(self, app_name: str) -> Dict:
-        """Open an application."""
-        app_name = (app_name or "").strip().lower()
-        if not app_name:
-            return {"success": False, "action": "open_app", "error": "No app specified"}
+    async def _handle_greeting(self, intent: Dict) -> Dict:
+        """Reply to small talk instantly, no LLM."""
+        phrase = (intent.get("parameters", {}).get("phrase") or "").lower()
 
-        app_map = {
-            "chrome": "google-chrome",
-            "vs code": "code",
-            "vscode": "code",
-            "notepad": "notepad",
-            "git": "git",
-            "python": "python3",
-            "node": "node",
-            "docker": "docker",
-            "excel": "excel",
-            "word": "word",
-            "slack": "slack",
-            "discord": "discord",
+        if any(k in phrase for k in ("thank", "thx", "ty", "cheers")):
+            choices = ["You're welcome!", "Anytime.", "Glad I could help."]
+        elif any(k in phrase for k in ("bye", "goodbye", "see you", "cya", "later")):
+            choices = ["Goodbye!", "See you later.", "Take care."]
+        elif "good morning" in phrase:
+            choices = ["Good morning! What can I help with?", "Morning! Ready to go."]
+        elif "good afternoon" in phrase:
+            choices = ["Good afternoon! What's on the agenda?"]
+        elif "good evening" in phrase or "good night" in phrase:
+            choices = ["Good evening!", "Hope your day went well."]
+        elif any(k in phrase for k in ("how are you", "how's it going", "hows it going", "what's up", "whats up")):
+            choices = [
+                "I'm running smoothly. What can I do for you?",
+                "All systems good. What's up?",
+                "Doing great. How can I help?",
+            ]
+        else:
+            choices = [
+                "Hi! What can I help with?",
+                "Hey! How can I help?",
+                "Hello! What can I do for you?",
+            ]
+
+        return {
+            "success": True,
+            "action": "greeting",
+            "message": random.choice(choices),
         }
-        actual_app = app_map.get(app_name, app_name)
+
+    async def _handle_open_app(self, app_name: str) -> Dict:
+        """Open an application using the per-OS registry."""
+        # Caller may pass the raw user phrase; strip filler words first.
+        cleaned = strip_fillers(app_name or "")
+        if not cleaned:
+            return {
+                "success": False,
+                "action": "open_app",
+                "error": "No app specified",
+                "message": "Which app would you like me to open?",
+            }
+
+        # If they actually meant a website (e.g. "google"), redirect.
+        web_url = find_web_shortcut(cleaned)
+        if web_url and not find_known_app(cleaned):
+            return await self._handle_open_url(web_url)
+
+        canonical = find_known_app(cleaned) or cleaned
+        cmd = get_launch_command(canonical)
 
         try:
-            if sys.platform == "win32":
-                os.startfile(actual_app)  # type: ignore[attr-defined]
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", "-a", actual_app])
+            if cmd:
+                subprocess.Popen(cmd, shell=True)
             else:
-                subprocess.Popen([actual_app])
+                # Best-effort fallback for un-registered apps.
+                if sys.platform == "win32":
+                    subprocess.Popen(f"start {canonical}", shell=True)
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", "-a", canonical])
+                else:
+                    subprocess.Popen([canonical])
 
-            self.kb.learn_app_pattern(app_name, "open", True)
-            self.kb.track_resource(actual_app, "application")
+            self.kb.learn_app_pattern(canonical, "open", True)
+            self.kb.track_resource(canonical, "application")
 
             return {
                 "success": True,
                 "action": "open_app",
-                "app": app_name,
-                "message": f"Opening {app_name}...",
+                "app": canonical,
+                "message": f"Opening {canonical}...",
             }
-        except Exception as exc:
-            self.kb.learn_app_pattern(app_name, "open", False)
+        except FileNotFoundError:
+            self.kb.learn_app_pattern(canonical, "open", False)
             return {
                 "success": False,
                 "action": "open_app",
+                "app": canonical,
+                "error": "app_not_installed",
+                "message": f"I couldn't find '{canonical}' on your system. Is it installed?",
+            }
+        except Exception as exc:
+            self.kb.learn_app_pattern(canonical, "open", False)
+            return {
+                "success": False,
+                "action": "open_app",
+                "app": canonical,
                 "error": str(exc),
-                "message": f"Could not open {app_name}",
+                "message": f"Could not open {canonical}.",
             }
 
     async def _handle_open_file(self, file_path: str) -> Dict:

@@ -28,6 +28,9 @@ class ResponseGenerator:
 
         action = execution_result.get("action", "unknown")
 
+        if action == "greeting":
+            return execution_result.get("message", "Hi!")
+
         if action == "open_app":
             return f"I've opened {execution_result.get('app', 'the application')} for you."
 
@@ -88,6 +91,11 @@ class ResponseGenerator:
 
     def _generate_error_response(self, result: Dict) -> str:
         """Generate friendly error message."""
+        # Prefer a handler-provided friendly message over the raw error.
+        friendly = result.get("message")
+        if friendly and not friendly.lower().startswith("error"):
+            return friendly
+
         error = result.get("error", "Unknown error")
         action = result.get("action", "operation")
 
@@ -98,8 +106,9 @@ class ResponseGenerator:
             "Command timeout": "That command is taking too long.",
             "Permission denied": "I don't have permission to do that.",
             "No app specified": "Which app would you like me to open?",
+            "app_not_installed": f"I couldn't find that app on your system.",
         }
-        return canned.get(error, f"Error during {action}: {error}")
+        return canned.get(error, f"Sorry, that didn't work: {error}")
 
     async def _generate_clarification_prompt(self, result: Dict) -> str:
         """Use LLM only for ambiguous clarifications."""
