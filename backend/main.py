@@ -8,6 +8,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from agents.chappie import CHAPPIE
 from models.tts_handler import TTSHandler
@@ -20,6 +22,9 @@ logger = setup_logger(__name__)
 CONFIG_PATH = Path(__file__).parent / "config.json"
 with open(CONFIG_PATH) as f:
     CONFIG = json.load(f)
+
+# The static frontend lives at <repo>/frontend (one level above backend/).
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
 app = FastAPI(title="CHAPPIE - AI Desktop Agent")
 
@@ -125,6 +130,15 @@ async def process_text(payload: dict):
 @app.on_event("shutdown")
 async def on_shutdown():
     chappie.shutdown()
+
+
+# Serve the static frontend last so it doesn't shadow the API routes above.
+if FRONTEND_DIR.exists():
+    app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+
+    @app.get("/")
+    async def index():
+        return FileResponse(FRONTEND_DIR / "index.html")
 
 
 if __name__ == "__main__":
