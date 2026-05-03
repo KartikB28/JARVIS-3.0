@@ -6,6 +6,7 @@ shell command for the host OS. Lets the launcher just work on Windows,
 macOS, and Linux without each handler caring about the difference.
 """
 
+import os
 import re
 import sys
 from typing import Optional
@@ -299,3 +300,113 @@ def get_launch_command(canonical_name: str) -> Optional[str]:
     if sys.platform == "darwin":
         return info.get("darwin")
     return info.get("linux")
+
+
+# ============================================================
+# Special-folder shortcuts (cross-OS)
+# ============================================================
+
+# Folder name -> subdirectory under $HOME (empty string == $HOME itself).
+SPECIAL_FOLDERS = {
+    "downloads": "Downloads",
+    "download": "Downloads",
+    "desktop": "Desktop",
+    "documents": "Documents",
+    "docs": "Documents",
+    "pictures": "Pictures",
+    "photos": "Pictures",
+    "music": "Music",
+    "videos": "Videos",
+    "movies": "Videos",
+    "home": "",
+    "home folder": "",
+    "user folder": "",
+    "my folder": "",
+}
+
+
+def resolve_special_path(name: str) -> Optional[str]:
+    """Resolve a special-folder name to an absolute path, or None."""
+    sub = SPECIAL_FOLDERS.get((name or "").lower().strip())
+    if sub is None:
+        return None
+    home = os.path.expanduser("~")
+    return os.path.join(home, sub) if sub else home
+
+
+def find_special_folder(text: str) -> Optional[str]:
+    """Find a special folder reference in `text` (e.g. 'my downloads')."""
+    lowered = (text or "").lower()
+    # Prefer longest names so 'home folder' beats 'home'.
+    for name in sorted(SPECIAL_FOLDERS.keys(), key=len, reverse=True):
+        if re.search(rf"\b(?:my\s+|the\s+)?{re.escape(name)}(?:\s+folder|\s+directory)?\b", lowered):
+            return name
+    return None
+
+
+# ============================================================
+# Drive letter recognition
+# ============================================================
+
+# Matches: "disk C", "drive C", "C drive", "C disk", "C:", "C:\".
+DRIVE_RX = re.compile(
+    r"\b(?:disk|drive|partition)\s+([a-z])\b"
+    r"|\b([a-z])\s+(?:drive|disk)\b"
+    r"|(?<![a-z])([a-z]):\\?",
+    re.IGNORECASE,
+)
+
+
+def find_drive_letter(text: str) -> Optional[str]:
+    """Return the upper-case letter a user is referring to, or None."""
+    m = DRIVE_RX.search(text or "")
+    if not m:
+        return None
+    letter = next((g for g in m.groups() if g), None)
+    return letter.upper() if letter else None
+
+
+# ============================================================
+# Browser-targeted URL commands
+# ============================================================
+
+BROWSER_NAMES = {"chrome", "firefox", "edge", "brave", "safari"}
+
+
+def get_browser_url_command(browser: str, url: str) -> Optional[str]:
+    """Return a shell command to open `url` in a specific `browser`."""
+    canonical = find_known_app(browser) or browser
+    if canonical not in BROWSER_NAMES:
+        return None
+
+    # Use double-quotes around URLs in case they contain shell-significant chars.
+    quoted = f'"{url}"'
+    if sys.platform == "win32":
+        win_bin = {
+            "chrome": "chrome",
+            "firefox": "firefox",
+            "edge": "msedge",
+            "brave": "brave",
+        }.get(canonical)
+        if not win_bin:
+            return None
+        return f"start {win_bin} {quoted}"
+    if sys.platform == "darwin":
+        mac_app = {
+            "chrome": "Google Chrome",
+            "firefox": "Firefox",
+            "edge": "Microsoft Edge",
+            "brave": "Brave Browser",
+            "safari": "Safari",
+        }.get(canonical)
+        return f'open -a "{mac_app}" {quoted}'
+    # Linux
+    linux_bin = {
+        "chrome": "google-chrome",
+        "firefox": "firefox",
+        "edge": "microsoft-edge",
+        "brave": "brave-browser",
+    }.get(canonical)
+    if not linux_bin:
+        return None
+    return f"{linux_bin} {quoted}"

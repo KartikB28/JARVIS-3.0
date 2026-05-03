@@ -40,6 +40,7 @@ class IntentType(Enum):
 
     OPEN_APP = "open_app"
     OPEN_FILE = "open_file"
+    OPEN_PATH = "open_path"
     OPEN_URL = "open_url"
     EXECUTE_CODE = "execute_code"
     SEARCH = "search"

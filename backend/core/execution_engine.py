@@ -60,8 +60,13 @@ class ExecutionEngine:
                 return await self._handle_open_app(params.get("target", ""))
             if intent_type == IntentType.OPEN_FILE:
                 return await self._handle_open_file(params.get("target", ""))
+            if intent_type == IntentType.OPEN_PATH:
+                return await self._handle_open_path(params.get("target", ""))
             if intent_type == IntentType.OPEN_URL:
-                return await self._handle_open_url(params.get("target", ""))
+                return await self._handle_open_url(
+                    params.get("target", ""),
+                    browser=params.get("browser"),
+                )
             if intent_type == IntentType.FILE_OPERATION:
                 return await self._handle_file_operation(intent)
             if intent_type == IntentType.EXECUTE_CODE:
@@ -216,24 +221,73 @@ class ExecutionEngine:
         except Exception as exc:
             return {"success": False, "action": "open_file", "error": str(exc)}
 
-    async def _handle_open_url(self, url: str) -> Dict:
-        """Open URL in browser."""
+    async def _handle_open_url(self, url: str, browser: str = None) -> Dict:
+        """Open URL in default browser, or in a specific browser if given."""
         try:
             url = (url or "").strip()
             if not url.startswith(("http://", "https://")):
                 url = "https://" + url
 
-            webbrowser.open(url)
+            if browser:
+                from core.app_registry import get_browser_url_command
+
+                cmd = get_browser_url_command(browser, url)
+                if cmd:
+                    subprocess.Popen(cmd, shell=True)
+                else:
+                    webbrowser.open(url)
+            else:
+                webbrowser.open(url)
+
             self.kb.track_resource(url, "url")
 
             return {
                 "success": True,
                 "action": "open_url",
                 "url": url,
-                "message": f"Opening {url}...",
+                "browser": browser,
+                "message": (
+                    f"Opening {url} in {browser}..." if browser else f"Opening {url}..."
+                ),
             }
         except Exception as exc:
             return {"success": False, "action": "open_url", "error": str(exc)}
+
+    async def _handle_open_path(self, path: str) -> Dict:
+        """Open a folder/path in the system file manager."""
+        try:
+            expanded = os.path.expanduser(os.path.expandvars(path or ""))
+            if not expanded:
+                return {
+                    "success": False,
+                    "action": "open_path",
+                    "error": "No path specified",
+                    "message": "Which folder would you like me to open?",
+                }
+            if not os.path.exists(expanded):
+                return {
+                    "success": False,
+                    "action": "open_path",
+                    "error": "Path not found",
+                    "message": f"I couldn't find {path}.",
+                }
+
+            if sys.platform == "win32":
+                subprocess.Popen(f'explorer "{expanded}"', shell=True)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", expanded])
+            else:
+                subprocess.Popen(["xdg-open", expanded])
+
+            self.kb.track_resource(expanded, "folder")
+            return {
+                "success": True,
+                "action": "open_path",
+                "path": expanded,
+                "message": f"Opening {expanded}...",
+            }
+        except Exception as exc:
+            return {"success": False, "action": "open_path", "error": str(exc)}
 
     async def _handle_file_operation(self, intent: Dict) -> Dict:
         """Handle file create/delete/move/copy operations."""

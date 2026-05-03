@@ -3,7 +3,8 @@ Convert execution results into natural language responses.
 Minimal LLM involvement - mostly formatting.
 """
 
-from typing import Dict
+import os
+from typing import Dict, List
 
 from models.llm_handler import OllamaHandler
 from utils.logger import setup_logger
@@ -37,8 +38,17 @@ class ResponseGenerator:
         if action == "open_file":
             return f"Opening {execution_result.get('file', 'your file')} now."
 
+        if action == "open_path":
+            path = execution_result.get("path", "that folder")
+            short = os.path.basename(path.rstrip(os.sep)) or path
+            return f"Opening {short}."
+
         if action == "open_url":
-            return f"Navigating to {execution_result.get('url', 'that website')}..."
+            url = execution_result.get("url", "that website")
+            browser = execution_result.get("browser")
+            if browser:
+                return f"Opening {url} in {browser}."
+            return f"Navigating to {url}..."
 
         if action == "create_file":
             return f"Created {execution_result.get('file', 'the file')}."
@@ -88,6 +98,35 @@ class ResponseGenerator:
             return await self._generate_clarification_prompt(execution_result)
 
         return execution_result.get("message", "Task completed.")
+
+    async def generate_multi(
+        self,
+        results: List[Dict],
+        knowledge_context: str,
+        user_input: str,
+    ) -> str:
+        """Generate a response covering an N-step plan."""
+        if not results:
+            return "I'm not sure what you want me to do."
+
+        if len(results) == 1:
+            return await self.generate(results[0], knowledge_context)
+
+        # Multi-step: produce per-step lines, then a one-line summary.
+        lines: List[str] = []
+        had_failure = False
+        for r in results:
+            if r.get("success"):
+                line = await self.generate(r, knowledge_context)
+            else:
+                had_failure = True
+                line = self._generate_error_response(r)
+            lines.append(f"- {line}")
+
+        header = (
+            "Here's what I did:" if not had_failure else "Here's what happened:"
+        )
+        return header + "\n" + "\n".join(lines)
 
     def _generate_error_response(self, result: Dict) -> str:
         """Generate friendly error message."""

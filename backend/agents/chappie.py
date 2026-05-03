@@ -4,11 +4,12 @@ Routes between parser, executor, and response generator.
 """
 
 import uuid
-from typing import Dict
+from typing import Dict, List
 
 from core.execution_engine import ExecutionEngine
-from core.intent_parser import IntentParser
+from core.intent_parser import IntentParser, IntentType
 from core.knowledge_base import KnowledgeBase
+from core.planner import Planner
 from core.response_generator import ResponseGenerator
 from models.llm_handler import OllamaHandler
 from utils.logger import setup_logger
@@ -39,40 +40,59 @@ class CHAPPIE:
         self.kb = KnowledgeBase(db_path=db_path)
         self.llm = OllamaHandler(config)
         self.parser = IntentParser(self.kb)
+        self.planner = Planner(self.kb, self.parser, self.llm)
         self.executor = ExecutionEngine(self.kb, config)
         self.response_gen = ResponseGenerator(self.llm, self.kb)
 
         logger.info(f"CHAPPIE initialized (session: {self.session_id})")
 
     async def process(self, user_input: str) -> str:
-        """Main processing loop. Minimal LLM usage for translation only."""
+        """Plan -> execute -> respond. LLM only used for ambiguous fallbacks."""
         logger.info(f"Processing: {user_input}")
 
-        # 1. Pull context from the knowledge base
         knowledge_context = self.kb.build_context_prompt(user_input)
 
-        # 2. Parse intent (Python-heavy)
-        intent = self.parser.parse(user_input, knowledge_context)
+        # 1. Build a plan (1 to N steps).
+        plan = await self.planner.plan(user_input, knowledge_context)
+        logger.info(f"Plan: {[s['description'] for s in plan]}")
 
-        # 3. Execute (100% Python)
-        execution_result = await self.executor.execute(intent)
-        execution_result.setdefault("original_input", user_input)
+        # 2. Execute each step in order. Stop the chain on a hard failure
+        #    (but still let clarifications flow through).
+        results: List[Dict] = []
+        for step in plan:
+            intent_dict = {
+                "type": step["intent"],
+                "parameters": dict(step.get("parameters", {})),
+                "original_input": user_input,
+                "knowledge_context": knowledge_context,
+            }
+            result = await self.executor.execute(intent_dict)
+            result.setdefault("original_input", user_input)
+            results.append(result)
 
-        # 4. Generate response (minimal LLM)
-        response = await self.response_gen.generate(execution_result, knowledge_context)
+            if (
+                not result.get("success")
+                and result.get("action") != "clarification_needed"
+            ):
+                break
 
-        # 5. Log interaction for learning
+        # 3. Generate a single user-facing response.
+        response = await self.response_gen.generate_multi(
+            results, knowledge_context, user_input
+        )
+
+        # 4. Log + learn.
+        overall_success = bool(results) and all(r.get("success") for r in results)
         self.kb.log_interaction(
             user_input=user_input,
             agent_response=response,
-            tools_used=[execution_result.get("action", "unknown")],
+            tools_used=[r.get("action", "unknown") for r in results],
             context_used=self.kb.get_session_context(),
-            success=execution_result.get("success", False),
+            success=overall_success,
             session_id=self.session_id,
         )
-
-        # 6. Auto-extract patterns
-        self._extract_and_learn(user_input, execution_result)
+        for r in results:
+            self._extract_and_learn(user_input, r)
 
         logger.info(f"Response: {response}")
         return response
