@@ -1,0 +1,36 @@
+{
+  "app": {
+    "name": "CHAPPIE - AI Desktop Agent",
+    "version": "2.0.0",
+    "philosophy": "Code-heavy, minimal LLM usage, self-learning"
+  },
+  "llm": {
+    "ollama_url": "http://localhost:11434",
+    "model": "mistral",
+    "temperature": 0.2,
+    "context_window": 2048,
+    "timeout": 60,
+    "role": "intent_translator_only"
+  },
+  "llm_system_prompt": "You are CHAPPIE's language interface. Your ONLY job is to translate user intent into structured format. Do NOT try to execute tasks - just understand what the user wants. Be concise. Maximum 2 sentences.",
+  "knowledge_base": {
+    "persistent": true,
+    "learn_from_interactions": true,
+    "context_window_ttl": 3600,
+    "max_memory_entries": 1000,
+    "db_path": "data/chappie.db"
+  },
+  "security": {
+    "require_confirmation_for": ["system_command", "delete_file"],
+    "dangerous_keywords": ["__import__", "eval", "rm -rf", "sudo"]
+  },
+  "whisper": {
+    "model": "base",
+    "language": "en"
+  },
+  "tts": {
+    "engine": "pyttsx3",
+    "rate": 180,
+    "voice": "default"
+  }
+}
