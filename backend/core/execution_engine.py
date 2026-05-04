@@ -35,11 +35,23 @@ def _platform_opener() -> str:
 class ExecutionEngine:
     """Executes parsed intents using Python."""
 
-    def __init__(self, knowledge_base, config: Dict, indexer=None, browser_agent=None):
+    def __init__(
+        self,
+        knowledge_base,
+        config: Dict,
+        indexer=None,
+        browser_agent=None,
+        skills=None,
+        llm=None,
+        persona_provider=None,
+    ):
         self.kb = knowledge_base
         self.config = config
         self.indexer = indexer  # optional FileIndexer for app/file search
         self.browser_agent = browser_agent  # optional BrowserAgent for web tasks
+        self.skills = skills  # optional SkillRegistry
+        self.llm = llm  # optional LLM (for CONVERSE)
+        self.persona_provider = persona_provider  # callable -> persona prompt
         self.execution_history = []
         self.scheduled_tasks = []
 
@@ -87,6 +99,10 @@ class ExecutionEngine:
                 return await self._handle_browser_task(params)
             if intent_type == IntentType.CLARIFY:
                 return await self._handle_clarify(params)
+            if intent_type == IntentType.SKILL:
+                return await self._handle_skill(params)
+            if intent_type == IntentType.CONVERSE:
+                return await self._handle_converse(params, intent)
 
             return {
                 "success": False,
@@ -507,9 +523,34 @@ class ExecutionEngine:
         """Learn and store user preference."""
         try:
             params = intent["parameters"]
+            text = (intent.get("original_input") or "").lower()
+
+            # Detect name-learning patterns and store under "name" specifically.
+            if (
+                "my name is" in text
+                or text.startswith("call me ")
+                or text.startswith("i'm ")
+                or text.startswith("i am ")
+            ):
+                key = "name"
+                # In these patterns the regex captured a single group → 'target'.
+                # The parser lower-cased the input, so title-case for a clean
+                # display (handles 'o'brien' -> "O'Brien" via str.title).
+                raw_value = (
+                    params.get("target") or params.get("source") or ""
+                ).strip()
+                value = raw_value.title() if raw_value else raw_value
+                self.kb.learn_preference(key, value, "identity", confidence=0.99)
+                return {
+                    "success": True,
+                    "action": "learn_preference",
+                    "key": key,
+                    "value": value,
+                    "message": f"Got it, {value}. I'll remember.",
+                }
+
             key = params.get("source") or "preference"
             value = params.get("target", "")
-
             self.kb.learn_preference(key, value, "user_preference", confidence=0.95)
 
             return {
@@ -628,6 +669,84 @@ class ExecutionEngine:
             "action": "clarify",
             "question": question,
             "message": question,
+        }
+
+    async def _handle_skill(self, params: Dict) -> Dict:
+        """Dispatch to a registered skill by name."""
+        skill_name = (params.get("skill") or "").strip()
+        skill_params = params.get("params") or {}
+
+        if not self.skills:
+            return {
+                "success": False,
+                "action": "skill",
+                "error": "no_skill_registry",
+                "message": "Skills aren't initialized.",
+            }
+        skill = self.skills.get(skill_name)
+        if skill is None:
+            return {
+                "success": False,
+                "action": "skill",
+                "skill": skill_name,
+                "error": "unknown_skill",
+                "message": f"I don't have a '{skill_name}' skill.",
+            }
+        try:
+            result = await skill.execute(skill_params)
+            result.setdefault("action", "skill")
+            result.setdefault("skill", skill_name)
+            return result
+        except Exception as exc:
+            logger.error(f"Skill {skill_name} crashed: {exc}")
+            return {
+                "success": False,
+                "action": "skill",
+                "skill": skill_name,
+                "error": str(exc),
+                "message": f"Something went wrong running the {skill_name} skill: {exc}",
+            }
+
+    async def _handle_converse(self, params: Dict, intent: Dict) -> Dict:
+        """Freeform conversational reply with the JARVIS persona prompt."""
+        prompt = (params.get("prompt") or intent.get("original_input") or "").strip()
+        if not prompt:
+            return {
+                "success": True,
+                "action": "converse",
+                "message": "I'm here. What's on your mind?",
+            }
+        if not self.llm:
+            return {
+                "success": True,
+                "action": "converse",
+                "message": "I'm not sure how to handle that yet.",
+            }
+
+        persona = ""
+        if callable(self.persona_provider):
+            try:
+                persona = self.persona_provider() or ""
+            except Exception:
+                persona = ""
+
+        try:
+            text = await self.llm.generate(
+                messages=[{"role": "user", "content": prompt}],
+                system=persona or None,
+                temperature=0.7,
+            )
+        except Exception as exc:
+            logger.error(f"Converse LLM failed: {exc}")
+            text = ""
+
+        if not text:
+            text = "I heard you, but my brain's offline at the moment — try again in a sec."
+
+        return {
+            "success": True,
+            "action": "converse",
+            "message": text,
         }
 
     async def _handle_system_command(self, command: str) -> Dict:

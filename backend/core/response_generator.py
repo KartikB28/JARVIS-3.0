@@ -56,6 +56,12 @@ class ResponseGenerator:
         if action == "browser_task":
             return execution_result.get("message", "Done.")
 
+        if action == "skill":
+            return execution_result.get("message", "Done.")
+
+        if action == "converse":
+            return execution_result.get("message", "")
+
         if action == "clarify":
             return execution_result.get("question") or execution_result.get(
                 "message", "Could you tell me a bit more?"
@@ -92,6 +98,9 @@ class ResponseGenerator:
             return f"Searching for '{execution_result.get('query', 'that')}'..."
 
         if action == "learn_preference":
+            # Prefer the handler's custom message (e.g. "Got it, Kartik. I'll remember.")
+            if execution_result.get("message"):
+                return execution_result["message"]
             return (
                 f"Got it! I'll remember that your "
                 f"{execution_result.get('key')} is {execution_result.get('value')}."

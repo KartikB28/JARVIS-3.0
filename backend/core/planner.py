@@ -147,10 +147,11 @@ Examples:
 class Planner:
     """Builds an ordered list of plan steps from natural-language input."""
 
-    def __init__(self, kb, parser: IntentParser, llm: OllamaHandler):
+    def __init__(self, kb, parser: IntentParser, llm: OllamaHandler, skills=None):
         self.kb = kb
         self.parser = parser
         self.llm = llm
+        self.skills = skills  # SkillRegistry, optional
 
     # ------------------------------------------------------------------
     # Public API
@@ -172,6 +173,11 @@ class Planner:
         if browser_steps:
             return browser_steps
 
+        # Skill match (write a letter, schedule X, take a note, ...)
+        skill_step = self._try_skill_match(text)
+        if skill_step:
+            return [skill_step]
+
         # Compound chains so "launch vscode and open my downloads" -> 2 steps.
         chain_steps = self._try_chain(text, knowledge_context)
         if chain_steps and len(chain_steps) > 1:
@@ -187,11 +193,13 @@ class Planner:
         if llm_steps:
             return llm_steps
 
+        # No structured plan possible — fall through to a free conversational
+        # reply. CHAPPIE talks; it doesn't just "I don't understand" at people.
         return [
             {
-                "intent": IntentType.UNKNOWN,
-                "parameters": {"original_input": text},
-                "description": "clarify",
+                "intent": IntentType.CONVERSE,
+                "parameters": {"prompt": text},
+                "description": "converse",
             }
         ]
 
@@ -223,6 +231,20 @@ class Planner:
             return [self._intent_to_step(intent)]
 
         return None
+
+    def _try_skill_match(self, text: str) -> Optional[Dict]:
+        """If a registered skill claims this input, return a single SKILL step."""
+        if not self.skills:
+            return None
+        match = self.skills.find_match(text)
+        if not match:
+            return None
+        skill, params = match
+        return {
+            "intent": IntentType.SKILL,
+            "parameters": {"skill": skill.name, "params": params},
+            "description": f"skill:{skill.name}",
+        }
 
     def _try_browser_task(self, text: str) -> Optional[List[Dict]]:
         """Recognize "open youtube and play X" / "ask chatgpt X" patterns."""

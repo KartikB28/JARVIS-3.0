@@ -12,9 +12,15 @@ from core.execution_engine import ExecutionEngine
 from core.file_indexer import FileIndexer
 from core.intent_parser import IntentParser, IntentType
 from core.knowledge_base import KnowledgeBase
+from core.personality import build_persona_prompt
 from core.planner import Planner
 from core.response_generator import ResponseGenerator
-from models.llm_handler import OllamaHandler
+from core.skills import SkillRegistry
+from core.skills.calendar_skill import CalendarSkill
+from core.skills.document_skill import DocumentSkill
+from core.skills.email_skill import EmailSkill
+from core.skills.notes_skill import NotesSkill
+from models.llm_handler import LLMHandler
 from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -44,14 +50,25 @@ class CHAPPIE:
         self.indexer = FileIndexer(self.kb)
         self.clarification_store = ClarificationStore(self.kb)
         self.browser_agent = BrowserAgent(self.kb, config)
-        self.llm = OllamaHandler(config)
+        self.llm = LLMHandler(config)
         self.parser = IntentParser(self.kb)
-        self.planner = Planner(self.kb, self.parser, self.llm)
+
+        # Skill registry: built-in skills first.
+        self.skills = SkillRegistry()
+        self.skills.register(DocumentSkill(self.kb, config, llm=self.llm))
+        self.skills.register(EmailSkill(self.kb, config, llm=self.llm))
+        self.skills.register(CalendarSkill(self.kb, config, llm=self.llm))
+        self.skills.register(NotesSkill(self.kb, config, llm=self.llm))
+
+        self.planner = Planner(self.kb, self.parser, self.llm, skills=self.skills)
         self.executor = ExecutionEngine(
             self.kb,
             config,
             indexer=self.indexer,
             browser_agent=self.browser_agent,
+            skills=self.skills,
+            llm=self.llm,
+            persona_provider=lambda: build_persona_prompt(self.kb),
         )
         self.response_gen = ResponseGenerator(self.llm, self.kb)
 

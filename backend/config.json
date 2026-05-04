@@ -5,14 +5,55 @@
     "philosophy": "Code-heavy, minimal LLM usage, self-learning"
   },
   "llm": {
+    "provider": "ollama",
     "ollama_url": "http://localhost:11434",
     "model": "mistral",
-    "temperature": 0.2,
-    "context_window": 2048,
+    "temperature": 0.3,
+    "context_window": 4096,
     "timeout": 60,
-    "role": "intent_translator_only"
+    "_provider_examples": {
+      "ollama_local": {
+        "provider": "ollama",
+        "ollama_url": "http://localhost:11434",
+        "model": "mistral"
+      },
+      "kimi_k2": {
+        "provider": "openai_compatible",
+        "base_url": "https://api.moonshot.ai/v1",
+        "model": "kimi-k2-turbo-preview",
+        "api_key_env": "MOONSHOT_API_KEY"
+      },
+      "qwen": {
+        "provider": "openai_compatible",
+        "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-plus",
+        "api_key_env": "DASHSCOPE_API_KEY"
+      },
+      "openrouter": {
+        "provider": "openai_compatible",
+        "base_url": "https://openrouter.ai/api/v1",
+        "model": "moonshotai/kimi-k2",
+        "api_key_env": "OPENROUTER_API_KEY"
+      }
+    }
   },
-  "llm_system_prompt": "You are CHAPPIE's language interface. Your ONLY job is to translate user intent into structured format. Do NOT try to execute tasks - just understand what the user wants. Be concise. Maximum 2 sentences.",
+  "llm_system_prompt": "You are CHAPPIE — a personal AI assistant in the style of JARVIS. Be concise, capable, and direct. Never say 'I'm just an AI'.",
+  "skills": {
+    "document_dir": "~/Documents/CHAPPIE",
+    "calendar_dir": "~/Documents/CHAPPIE/calendar",
+    "notes_dir": "~/Documents/CHAPPIE",
+    "document_auto_open": true,
+    "calendar_auto_open": true,
+    "default_event_minutes": 60
+  },
+  "smtp": {
+    "enabled": false,
+    "host": "smtp.gmail.com",
+    "port": 587,
+    "user": "",
+    "password_env": "SMTP_PASSWORD",
+    "from": ""
+  },
   "knowledge_base": {
     "persistent": true,
     "learn_from_interactions": true,

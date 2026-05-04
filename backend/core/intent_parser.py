@@ -26,7 +26,7 @@ GREETING_PATTERNS = [
     r"^good\s+(morning|afternoon|evening|night)[\s!.?]*$",
     r"^(thanks|thank\s+you|thx|ty|cheers)[\s!.?]*$",
     r"^(bye|goodbye|see\s+you|cya|later|good\s*night)[\s!.?]*$",
-    r"^how\s+(are\s+you|are\s+things|'?s\s+it\s+going|s\s+it\s+going)(\s+today|\s+doing)?[\s!.?]*$",
+    r"^how\s+(?:are\s+you|are\s+things|'?s\s+it\s+going|s\s+it\s+going)(?:\s+\w+){0,4}[\s!.?]*$",
     r"^what'?s\s+up[\s!.?]*$",
     r"^(nice\s+to\s+meet\s+you|pleased\s+to\s+meet\s+you)[\s!.?]*$",
 ]
@@ -55,6 +55,8 @@ class IntentType(Enum):
     DATA_ANALYSIS = "data_analysis"
     GREETING = "greeting"
     CLARIFY = "clarify"
+    CONVERSE = "converse"
+    SKILL = "skill"
     UNKNOWN = "unknown"
 
 
@@ -77,6 +79,19 @@ class IntentParser:
         return {
             # Preferences need to be checked BEFORE generic queries / opens.
             IntentType.LEARN_PREFERENCE: [
+                # Name-learning: "my name is X", "call me X", "I am X" (when X is a single name-shaped token)
+                (
+                    r"^my\s+name\s+is\s+([A-Za-z][A-Za-z'-]{1,30}(?:\s+[A-Za-z][A-Za-z'-]{1,30})?)\s*\.?\s*$",
+                    99,
+                ),
+                (
+                    r"^call\s+me\s+([A-Za-z][A-Za-z'-]{1,30})\s*\.?\s*$",
+                    99,
+                ),
+                (
+                    r"^i'?m\s+([A-Za-z][A-Za-z'-]{1,30})\s*\.?\s*$",
+                    91,
+                ),
                 (
                     r"remember\s+(?:that\s+)?(?:my\s+|i\s+)(?:favorite|preferred|default|main)\s+(\w+)\s+is\s+(.*?)\s*$",
                     98,
