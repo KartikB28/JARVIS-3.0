@@ -35,9 +35,10 @@ def _platform_opener() -> str:
 class ExecutionEngine:
     """Executes parsed intents using Python."""
 
-    def __init__(self, knowledge_base, config: Dict):
+    def __init__(self, knowledge_base, config: Dict, indexer=None):
         self.kb = knowledge_base
         self.config = config
+        self.indexer = indexer  # optional FileIndexer for app/file search
         self.execution_history = []
         self.scheduled_tasks = []
 
@@ -133,8 +134,7 @@ class ExecutionEngine:
         }
 
     async def _handle_open_app(self, app_name: str) -> Dict:
-        """Open an application using the per-OS registry."""
-        # Caller may pass the raw user phrase; strip filler words first.
+        """Open an application: registry -> web shortcut -> file index -> blind launch."""
         cleaned = strip_fillers(app_name or "")
         if not cleaned:
             return {
@@ -144,19 +144,32 @@ class ExecutionEngine:
                 "message": "Which app would you like me to open?",
             }
 
-        # If they actually meant a website (e.g. "google"), redirect.
+        # 1. Curated app registry (fastest, always-correct mapping per-OS).
+        canonical = find_known_app(cleaned)
+        if canonical:
+            return await self._launch_registered(canonical)
+
+        # 2. Known web shortcut (e.g. user said "google" -> google.com).
         web_url = find_web_shortcut(cleaned)
-        if web_url and not find_known_app(cleaned):
+        if web_url:
             return await self._handle_open_url(web_url)
 
-        canonical = find_known_app(cleaned) or cleaned
-        cmd = get_launch_command(canonical)
+        # 3. Search the file index for a matching app/file/folder.
+        if self.indexer:
+            matches = self.indexer.search(cleaned, limit=5)
+            if matches:
+                return await self._open_indexed(matches[0])
 
+        # 4. Last resort: blind launch via the shell.
+        return await self._launch_registered(cleaned)
+
+    async def _launch_registered(self, canonical: str) -> Dict:
+        """Launch a name through the OS shell (uses registry command if known)."""
+        cmd = get_launch_command(canonical)
         try:
             if cmd:
                 subprocess.Popen(cmd, shell=True)
             else:
-                # Best-effort fallback for un-registered apps.
                 if sys.platform == "win32":
                     subprocess.Popen(f"start {canonical}", shell=True)
                 elif sys.platform == "darwin":
@@ -192,31 +205,88 @@ class ExecutionEngine:
                 "message": f"Could not open {canonical}.",
             }
 
-    async def _handle_open_file(self, file_path: str) -> Dict:
-        """Open a file with the system default application."""
+    async def _open_indexed(self, entry) -> Dict:
+        """Open an item that came back from the FileIndexer."""
+        path = entry.path
+        if not os.path.exists(path):
+            return {
+                "success": False,
+                "action": "open_indexed",
+                "error": "Path missing",
+                "message": f"I had '{entry.name}' indexed but the file is gone now.",
+            }
+
         try:
-            expanded = os.path.expanduser(file_path)
-
-            if not os.path.exists(expanded):
-                return {
-                    "success": False,
-                    "action": "open_file",
-                    "error": "File not found",
-                    "message": f"Could not find {file_path}",
-                }
-
             if sys.platform == "win32":
-                os.startfile(expanded)  # type: ignore[attr-defined]
+                # os.startfile handles .lnk shortcuts, .exe, documents, folders.
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
             else:
-                subprocess.Popen([_platform_opener(), expanded])
+                if entry.ext == ".desktop":
+                    subprocess.Popen(["gtk-launch", os.path.basename(path)])
+                else:
+                    subprocess.Popen(["xdg-open", path])
 
-            self.kb.track_resource(expanded, "file")
+            self.kb.track_resource(path, entry.kind)
+            self.kb.learn_app_pattern(entry.name.lower(), "open", True)
 
             return {
                 "success": True,
+                "action": "open_indexed",
+                "name": entry.name,
+                "path": path,
+                "kind": entry.kind,
+                "location": entry.location,
+                "message": f"Opening {entry.name} from {entry.location}...",
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "action": "open_indexed",
+                "name": entry.name,
+                "path": path,
+                "error": str(exc),
+                "message": f"Could not open {entry.name}.",
+            }
+
+    async def _handle_open_file(self, file_path: str) -> Dict:
+        """Open a file by literal path; if not found, search the index by name."""
+        try:
+            expanded = os.path.expanduser(file_path)
+
+            if os.path.exists(expanded):
+                if sys.platform == "win32":
+                    os.startfile(expanded)  # type: ignore[attr-defined]
+                else:
+                    subprocess.Popen([_platform_opener(), expanded])
+
+                self.kb.track_resource(expanded, "file")
+
+                return {
+                    "success": True,
+                    "action": "open_file",
+                    "file": expanded,
+                    "message": f"Opening {file_path}...",
+                }
+
+            # Path not found literally — try the index by name.
+            if self.indexer:
+                matches = self.indexer.search(file_path, kind="file", limit=5)
+                if matches:
+                    return await self._open_indexed(matches[0])
+                # Maybe the user meant a folder; widen the search.
+                folder_matches = self.indexer.search(
+                    file_path, kind="folder", limit=5
+                )
+                if folder_matches:
+                    return await self._open_indexed(folder_matches[0])
+
+            return {
+                "success": False,
                 "action": "open_file",
-                "file": expanded,
-                "message": f"Opening {file_path}...",
+                "error": "File not found",
+                "message": f"Could not find {file_path}",
             }
         except Exception as exc:
             return {"success": False, "action": "open_file", "error": str(exc)}

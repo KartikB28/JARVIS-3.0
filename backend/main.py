@@ -11,6 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import asyncio
+
 from agents.chappie import CHAPPIE
 from models.tts_handler import TTSHandler
 from models.whisper_handler import WhisperHandler
@@ -125,6 +127,52 @@ async def process_text(payload: dict):
         return {"error": "text is required"}
     response = await chappie.process(text)
     return {"response": response}
+
+
+@app.on_event("startup")
+async def on_startup():
+    """Kick off the file index build in the background. First run can take
+    30-60s on big drives; the agent is usable immediately, indexed search
+    just isn't available until it finishes."""
+    asyncio.create_task(_background_index_build())
+
+
+async def _background_index_build():
+    try:
+        result = await chappie.indexer.build_index()
+        logger.info(f"File index ready: {result}")
+    except Exception as exc:
+        logger.error(f"Background index build failed: {exc}")
+
+
+@app.post("/reindex")
+async def reindex():
+    """Force a full rebuild of the file index."""
+    return await chappie.indexer.build_index(force=True)
+
+
+@app.get("/index/stats")
+async def index_stats():
+    return chappie.indexer.stats()
+
+
+@app.get("/index/search")
+async def index_search(q: str, kind: str = None, limit: int = 10):
+    """Debug endpoint: return raw matches for a query."""
+    matches = chappie.indexer.search(q, kind=kind, limit=limit)
+    return {
+        "query": q,
+        "results": [
+            {
+                "name": m.name,
+                "path": m.path,
+                "kind": m.kind,
+                "location": m.location,
+                "score": m.score,
+            }
+            for m in matches
+        ],
+    }
 
 
 @app.on_event("shutdown")

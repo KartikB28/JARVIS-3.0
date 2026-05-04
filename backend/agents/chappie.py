@@ -7,6 +7,7 @@ import uuid
 from typing import Dict, List
 
 from core.execution_engine import ExecutionEngine
+from core.file_indexer import FileIndexer
 from core.intent_parser import IntentParser, IntentType
 from core.knowledge_base import KnowledgeBase
 from core.planner import Planner
@@ -38,10 +39,11 @@ class CHAPPIE:
         db_path = kb_cfg.get("db_path", "data/chappie.db")
 
         self.kb = KnowledgeBase(db_path=db_path)
+        self.indexer = FileIndexer(self.kb)
         self.llm = OllamaHandler(config)
         self.parser = IntentParser(self.kb)
         self.planner = Planner(self.kb, self.parser, self.llm)
-        self.executor = ExecutionEngine(self.kb, config)
+        self.executor = ExecutionEngine(self.kb, config, indexer=self.indexer)
         self.response_gen = ResponseGenerator(self.llm, self.kb)
 
         logger.info(f"CHAPPIE initialized (session: {self.session_id})")

@@ -43,6 +43,16 @@ class ResponseGenerator:
             short = os.path.basename(path.rstrip(os.sep)) or path
             return f"Opening {short}."
 
+        if action == "open_indexed":
+            name = execution_result.get("name", "that")
+            location = execution_result.get("location", "")
+            kind = execution_result.get("kind", "")
+            if kind == "folder":
+                return f"Found a folder called '{name}' in {location}. Opening it."
+            if kind == "file":
+                return f"Found '{name}' in {location}. Opening it."
+            return f"Found '{name}' in your {location}. Opening it."
+
         if action == "open_url":
             url = execution_result.get("url", "that website")
             browser = execution_result.get("browser")
