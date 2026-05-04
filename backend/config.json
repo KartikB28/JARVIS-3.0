@@ -74,6 +74,12 @@
     "rate": 180,
     "voice": "default"
   },
+  "voice": {
+    "wake_phrases": ["chappie", "hey chappie", "ok chappie", "okay chappie", "yo chappie"],
+    "use_browser_tts": true,
+    "use_browser_stt": true,
+    "voice_pref": "Daniel|Google UK English Male|Microsoft Mark|Microsoft David"
+  },
   "browser_automation": {
     "headless": false,
     "user_data_dir": "data/browser_profile",

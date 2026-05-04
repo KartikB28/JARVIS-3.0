@@ -156,6 +156,12 @@ async def index_stats():
     return chappie.indexer.stats()
 
 
+@app.get("/voice/config")
+async def voice_config():
+    """Voice settings (wake phrases, voice prefs) for the frontend."""
+    return CONFIG.get("voice", {})
+
+
 @app.get("/index/search")
 async def index_search(q: str, kind: str = None, limit: int = 10):
     """Debug endpoint: return raw matches for a query."""
