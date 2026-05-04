@@ -28,6 +28,10 @@ python -m pip install --upgrade pip
 echo "==> Installing CHAPPIE dependencies..."
 python -m pip install -r backend/requirements.txt
 
+echo "==> Installing Chromium for browser automation (~150 MB)..."
+python -m playwright install chromium || \
+    echo "    (skipping; you can run 'python -m playwright install chromium' later)"
+
 mkdir -p data logs
 
 echo

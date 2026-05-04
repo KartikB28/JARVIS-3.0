@@ -35,10 +35,11 @@ def _platform_opener() -> str:
 class ExecutionEngine:
     """Executes parsed intents using Python."""
 
-    def __init__(self, knowledge_base, config: Dict, indexer=None):
+    def __init__(self, knowledge_base, config: Dict, indexer=None, browser_agent=None):
         self.kb = knowledge_base
         self.config = config
         self.indexer = indexer  # optional FileIndexer for app/file search
+        self.browser_agent = browser_agent  # optional BrowserAgent for web tasks
         self.execution_history = []
         self.scheduled_tasks = []
 
@@ -82,6 +83,10 @@ class ExecutionEngine:
                 return await self._handle_schedule_task(intent)
             if intent_type == IntentType.SYSTEM_COMMAND:
                 return await self._handle_system_command(params.get("target", ""))
+            if intent_type == IntentType.BROWSER_TASK:
+                return await self._handle_browser_task(params)
+            if intent_type == IntentType.CLARIFY:
+                return await self._handle_clarify(params)
 
             return {
                 "success": False,
@@ -574,6 +579,56 @@ class ExecutionEngine:
             }
         except Exception as exc:
             return {"success": False, "action": "schedule_task", "error": str(exc)}
+
+    async def _handle_browser_task(self, params: Dict) -> Dict:
+        """High-level browser automation (YouTube, ChatGPT, ...)."""
+        task = (params.get("task") or "").strip()
+
+        if not self.browser_agent:
+            return {
+                "success": False,
+                "action": "browser_task",
+                "task": task,
+                "error": "browser_agent_unavailable",
+                "message": (
+                    "Browser automation isn't initialized. Install Playwright "
+                    "(pip install playwright && playwright install chromium) "
+                    "and restart CHAPPIE."
+                ),
+            }
+
+        if task == "youtube_play":
+            result = await self.browser_agent.youtube_search_and_play(
+                params.get("query", "")
+            )
+        elif task == "chatgpt_ask":
+            result = await self.browser_agent.chatgpt_ask(params.get("question", ""))
+        else:
+            return {
+                "success": False,
+                "action": "browser_task",
+                "task": task,
+                "error": "unknown_task",
+                "message": f"I don't know how to do '{task}' yet.",
+            }
+
+        result.setdefault("action", "browser_task")
+        if result.get("success"):
+            target = (
+                params.get("query") or params.get("question") or task
+            )
+            self.kb.track_resource(target[:120], "browser_task")
+        return result
+
+    async def _handle_clarify(self, params: Dict) -> Dict:
+        """The orchestrator handles the conversational state. We just emit the question."""
+        question = params.get("question") or "Could you give me a bit more detail?"
+        return {
+            "success": True,
+            "action": "clarify",
+            "question": question,
+            "message": question,
+        }
 
     async def _handle_system_command(self, command: str) -> Dict:
         """Execute system command with safety checks."""

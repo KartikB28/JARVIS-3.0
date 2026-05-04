@@ -32,5 +32,10 @@
     "engine": "pyttsx3",
     "rate": 180,
     "voice": "default"
+  },
+  "browser_automation": {
+    "headless": false,
+    "user_data_dir": "data/browser_profile",
+    "timeout_ms": 15000
   }
 }

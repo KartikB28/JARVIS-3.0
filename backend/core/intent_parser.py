@@ -50,9 +50,11 @@ class IntentType(Enum):
     QUERY_KNOWLEDGE = "query_knowledge"
     SCHEDULE_TASK = "schedule_task"
     BROWSER_ACTION = "browser_action"
+    BROWSER_TASK = "browser_task"
     TEXT_GENERATION = "text_generation"
     DATA_ANALYSIS = "data_analysis"
     GREETING = "greeting"
+    CLARIFY = "clarify"
     UNKNOWN = "unknown"
 
 

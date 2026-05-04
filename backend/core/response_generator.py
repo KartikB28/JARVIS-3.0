@@ -53,6 +53,14 @@ class ResponseGenerator:
                 return f"Found '{name}' in {location}. Opening it."
             return f"Found '{name}' in your {location}. Opening it."
 
+        if action == "browser_task":
+            return execution_result.get("message", "Done.")
+
+        if action == "clarify":
+            return execution_result.get("question") or execution_result.get(
+                "message", "Could you tell me a bit more?"
+            )
+
         if action == "open_url":
             url = execution_result.get("url", "that website")
             browser = execution_result.get("browser")

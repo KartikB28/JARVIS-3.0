@@ -177,7 +177,7 @@ async def index_search(q: str, kind: str = None, limit: int = 10):
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    chappie.shutdown()
+    await chappie.async_shutdown()
 
 
 # Serve the static frontend last so it doesn't shadow the API routes above.

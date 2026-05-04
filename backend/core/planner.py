@@ -53,46 +53,94 @@ SEARCH_IN_RX = re.compile(
     re.IGNORECASE,
 )
 
+# "[open] youtube [and] {play|put|find|search [for]} <query>"
+YOUTUBE_PLAY_RX = re.compile(
+    r"^(?:open\s+)?(?:youtube|yt)\s*[,]?\s+"
+    r"(?:and\s+)?(?:play|put\s+on|put|search\s+(?:for\s+)?|find|show|watch)\s+"
+    r"(.+?)\s*$",
+    re.IGNORECASE,
+)
+
+# "[open] chatgpt [and] {ask [it] [about] | tell me about | about} <question>"
+CHATGPT_ASK_RX = re.compile(
+    r"^(?:open\s+)?(?:chat\s*gpt|chatgpt|gpt)\s*[,]?\s+"
+    r"(?:and\s+)?"
+    r"(?:ask\s+(?:it\s+)?(?:about\s+)?|tell\s+me\s+about\s+|about\s+|"
+    r"to\s+(?:tell|explain)\s+(?:me\s+)?(?:about\s+)?)?"
+    r"(.+?)\s*$",
+    re.IGNORECASE,
+)
+
+# "ask chatgpt [about] X"
+ASK_CHATGPT_RX = re.compile(
+    r"^ask\s+(?:chat\s*gpt|chatgpt|gpt)\s+(?:about\s+|to\s+(?:tell|explain)\s+(?:me\s+)?(?:about\s+)?)?"
+    r"(.+?)\s*$",
+    re.IGNORECASE,
+)
+
 # "<verb> ... folder/directory/drive/disk ..." — signals OPEN_PATH.
 PATH_VERBS = r"(?:open|show|browse|view|go\s+to|take\s+me\s+to)"
 
 
-PLANNER_SYSTEM_PROMPT = """You are CHAPPIE's task planner. Convert the user's request into a JSON list of executable steps.
+PLANNER_SYSTEM_PROMPT = """You are CHAPPIE's task planner. Output ONE JSON object. Never wrap in markdown.
 
-Available intents (one per step):
+Choose ONE shape:
+A) {"steps": [...]}                — executable plan
+B) {"clarify": "<single question>"} — when the request is ambiguous
+
+When to clarify:
+- Ambiguous names (e.g. "BBS" — which person/channel?)
+- Vague quantities or units ("1 cr" — per year, per semester, total?)
+- Multiple valid interpretations of "newest", "best", "the X video"
+- Action with multiple valid forms
+
+Make the question short, conversational, propose specific options when useful.
+
+Available step intents:
 - {"intent":"open_app","target":"<app>"}
 - {"intent":"open_url","target":"<url>","browser":"<optional>"}
 - {"intent":"open_path","target":"<absolute-path>"}
 - {"intent":"search","target":"<query>"}
-- {"intent":"file_operation","target":"<path>"}      // create/delete/find by phrasing
-- {"intent":"system_command","target":"<safe-cmd>"}  // never destructive
+- {"intent":"file_operation","target":"<path>"}
+- {"intent":"system_command","target":"<safe-cmd>"}
 - {"intent":"learn_preference","source":"<key>","target":"<value>"}
 - {"intent":"query_knowledge","target":"<question>"}
+- {"intent":"browser_task","task":"youtube_play","query":"..."}
+- {"intent":"browser_task","task":"chatgpt_ask","question":"..."}
 - {"intent":"greeting"}
 
 Known apps: chrome, firefox, edge, brave, safari, file explorer, notepad, vscode, calculator, cmd, terminal, powershell, word, excel, powerpoint, spotify, discord, slack, steam, vlc, obs.
-Web shortcuts: google, youtube, gmail, github, twitter, reddit, netflix, amazon, wikipedia.
+Web shortcuts: google, youtube, gmail, github, twitter, reddit, netflix, amazon, wikipedia, chatgpt, claude.
 Special paths: ~/Downloads, ~/Desktop, ~/Documents, ~/Pictures, ~/Music, ~/Videos, C:\\, D:\\.
 
 Rules:
-1. Output ONLY a JSON array. No markdown fences, no explanations.
+1. Output ONLY one JSON object. No markdown fences, no explanations.
 2. Steps execute top-to-bottom.
-3. Refuse destructive commands (rm -rf, format, del C:\\*, shutdown, etc.) by emitting an empty array [].
+3. Refuse destructive commands (rm -rf, format, del C:\\*, shutdown, etc.) — emit {"steps": []}.
 4. For multi-step asks, split into atomic steps.
-5. Prefer specific intents (open_url) over generic ones (system_command).
+5. Prefer specific intents (browser_task, open_url) over generic ones.
+6. When a follow-up message starts with "(clarifications: ...)", combine that
+   context with the original request and return steps.
 
 Examples:
-"open chrome and search for cats"
-[{"intent":"open_app","target":"chrome"},{"intent":"search","target":"cats"}]
 
-"create a folder called test on my desktop"
-[{"intent":"file_operation","target":"~/Desktop/test"}]
+"open YouTube and play BBS's newest gaming video"
+{"clarify":"Quick check — which BBS? BlackBoxStocks, BeerBiceps, BBS Gaming, or someone else?"}
 
-"open youtube in firefox"
-[{"intent":"open_url","target":"https://youtube.com","browser":"firefox"}]
+"open chatgpt and ask about colleges with fees under 1cr"
+{"clarify":"Just to confirm — 1 crore total over the program, per year, or per semester?"}
 
-"play despacito on spotify"
-[{"intent":"open_app","target":"spotify"},{"intent":"search","target":"despacito"}]
+"open chrome and youtube"
+{"steps":[{"intent":"open_app","target":"chrome"},{"intent":"open_url","target":"https://youtube.com"}]}
+
+"open YouTube and play the latest BlackBoxStocks gaming video"
+{"steps":[{"intent":"browser_task","task":"youtube_play","query":"BlackBoxStocks newest gaming video"}]}
+
+"ask chatgpt about the best private colleges in delhi with fees under 1cr per year"
+{"steps":[{"intent":"browser_task","task":"chatgpt_ask","question":"What are the best private colleges in Delhi with fees under 1 crore per year?"}]}
+
+"open YouTube and play BBS's newest gaming video (clarifications: BlackBoxStocks)"
+{"steps":[{"intent":"browser_task","task":"youtube_play","query":"BlackBoxStocks newest gaming video"}]}
 """
 
 
@@ -118,9 +166,13 @@ class Planner:
         if intent["type"] == IntentType.GREETING:
             return [self._intent_to_step(intent)]
 
-        # Compound chains FIRST so a chained request like
-        # "launch vscode and open my downloads" doesn't get hijacked by a
-        # path fast-path that scans the whole string.
+        # Browser tasks BEFORE chain split so "open youtube and play X"
+        # stays whole instead of getting split into [open_url, open_app].
+        browser_steps = self._try_browser_task(text)
+        if browser_steps:
+            return browser_steps
+
+        # Compound chains so "launch vscode and open my downloads" -> 2 steps.
         chain_steps = self._try_chain(text, knowledge_context)
         if chain_steps and len(chain_steps) > 1:
             return chain_steps
@@ -150,6 +202,11 @@ class Planner:
         fallback_intent: Optional[Dict] = None,
     ) -> Optional[List[Dict]]:
         """Plan a single utterance via the cheap fast-paths only."""
+        # High-level browser tasks (youtube_play, chatgpt_ask).
+        browser_steps = self._try_browser_task(text)
+        if browser_steps:
+            return browser_steps
+
         # "<X> in <browser>" (open or search variants).
         in_steps = self._try_in_pattern(text)
         if in_steps:
@@ -164,6 +221,39 @@ class Planner:
         intent = fallback_intent if fallback_intent is not None else self.parser.parse(text, ctx)
         if intent["type"] != IntentType.UNKNOWN:
             return [self._intent_to_step(intent)]
+
+        return None
+
+    def _try_browser_task(self, text: str) -> Optional[List[Dict]]:
+        """Recognize "open youtube and play X" / "ask chatgpt X" patterns."""
+        stripped = text.strip()
+
+        m = YOUTUBE_PLAY_RX.search(stripped)
+        if m:
+            query = m.group(1).strip().rstrip("?.!,")
+            if query:
+                return [
+                    {
+                        "intent": IntentType.BROWSER_TASK,
+                        "parameters": {"task": "youtube_play", "query": query},
+                        "description": f"youtube: play '{query[:40]}'",
+                    }
+                ]
+
+        m = ASK_CHATGPT_RX.search(stripped) or CHATGPT_ASK_RX.search(stripped)
+        if m:
+            question = m.group(1).strip().rstrip(".!")
+            # Strip filler so "open chatgpt please" / "now" don't become
+            # questions, but real one-word questions ("photosynthesis") pass.
+            cleaned = strip_fillers(question).strip()
+            if cleaned and len(cleaned) >= 3:
+                return [
+                    {
+                        "intent": IntentType.BROWSER_TASK,
+                        "parameters": {"task": "chatgpt_ask", "question": question},
+                        "description": f"chatgpt: '{question[:40]}'",
+                    }
+                ]
 
         return None
 
@@ -294,24 +384,55 @@ class Planner:
         return self._parse_llm_response(response)
 
     def _parse_llm_response(self, response: str) -> List[Dict]:
-        """Extract a JSON array of steps from the LLM output."""
-        # Strip code fences if the LLM ignored instructions.
-        cleaned = re.sub(r"^```(?:json)?|```$", "", response.strip(), flags=re.MULTILINE).strip()
+        """
+        Extract a plan or a clarification request from the LLM output.
 
-        # Find the first JSON array substring.
-        m = re.search(r"\[[\s\S]*\]", cleaned)
-        if not m:
-            logger.warning(f"No JSON array in LLM response: {response[:200]}")
-            return []
+        Accepts any of:
+          {"clarify": "<question>"}
+          {"steps": [<step>, ...]}
+          [<step>, ...]              (legacy bare list)
 
-        try:
-            raw_steps = json.loads(m.group(0))
-        except json.JSONDecodeError as exc:
-            logger.warning(f"LLM JSON parse failed: {exc}")
-            return []
-        if not isinstance(raw_steps, list):
-            return []
+        Clarification requests come back as a single CLARIFY step.
+        """
+        cleaned = re.sub(
+            r"^```(?:json)?|```$", "", response.strip(), flags=re.MULTILINE
+        ).strip()
 
+        # Try object-shaped output first (preferred).
+        obj_match = re.search(r"\{[\s\S]*\}", cleaned)
+        if obj_match:
+            try:
+                obj = json.loads(obj_match.group(0))
+            except json.JSONDecodeError:
+                obj = None
+
+            if isinstance(obj, dict):
+                if "clarify" in obj and isinstance(obj["clarify"], str):
+                    return [
+                        {
+                            "intent": IntentType.CLARIFY,
+                            "parameters": {"question": obj["clarify"].strip()},
+                            "description": "clarify",
+                        }
+                    ]
+                if "steps" in obj and isinstance(obj["steps"], list):
+                    return self._convert_steps(obj["steps"])
+
+        # Fall back to a bare JSON array.
+        arr_match = re.search(r"\[[\s\S]*\]", cleaned)
+        if arr_match:
+            try:
+                arr = json.loads(arr_match.group(0))
+                if isinstance(arr, list):
+                    return self._convert_steps(arr)
+            except json.JSONDecodeError:
+                pass
+
+        logger.warning(f"Unparseable LLM planner response: {response[:200]}")
+        return []
+
+    @staticmethod
+    def _convert_steps(raw_steps: List) -> List[Dict]:
         steps: List[Dict] = []
         for raw in raw_steps:
             if not isinstance(raw, dict):
