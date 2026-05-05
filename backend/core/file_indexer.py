@@ -165,6 +165,11 @@ class FileIndexer:
         else:
             self._index_linux_apps(emit)
 
+        # Cross-platform game launchers (best-effort)
+        self._index_steam_games(emit)
+        self._index_epic_games(emit)
+        self._index_riot_games(emit)
+
         self._index_user_folders(emit)
 
         if rows:
@@ -260,6 +265,165 @@ class FileIndexer:
                     break
 
     # ----- user document discovery -----
+
+    # ----- game launchers -----
+
+    def _index_steam_games(self, emit: Callable):
+        """Scan Steam's library for installed games and emit them as 'game' kind."""
+        steam_root = self._find_steam_root()
+        if not steam_root:
+            return
+
+        # Collect all library paths from libraryfolders.vdf
+        library_paths = [steam_root]
+        vdf_path = os.path.join(steam_root, "steamapps", "libraryfolders.vdf")
+        if os.path.exists(vdf_path):
+            try:
+                with open(vdf_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                # libraryfolders.vdf looks like:  "path"     "C:\\SteamLibrary"
+                for m in re.finditer(r'"path"\s*"([^"]+)"', content):
+                    library_paths.append(m.group(1).replace("\\\\", "\\"))
+            except OSError:
+                pass
+
+        seen = set()
+        for lib in library_paths:
+            steamapps = os.path.join(lib, "steamapps")
+            if not os.path.isdir(steamapps):
+                continue
+            try:
+                for fname in os.listdir(steamapps):
+                    if not fname.startswith("appmanifest_") or not fname.endswith(".acf"):
+                        continue
+                    full = os.path.join(steamapps, fname)
+                    appid, name = self._parse_steam_manifest(full)
+                    if not appid or not name or appid in seen:
+                        continue
+                    seen.add(appid)
+                    # Store the steam:// launch URL in the path field; the
+                    # executor's _open_indexed branches on this.
+                    launch_url = f"steam://rungameid/{appid}"
+                    if not emit(launch_url, name, "game", "steam", ".steam"):
+                        return
+            except OSError:
+                continue
+
+    def _find_steam_root(self) -> Optional[str]:
+        if sys.platform == "win32":
+            for env_var in ("PROGRAMFILES(X86)", "PROGRAMFILES"):
+                base = os.environ.get(env_var)
+                if base:
+                    cand = os.path.join(base, "Steam")
+                    if os.path.isdir(cand):
+                        return cand
+            for cand in (r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"):
+                if os.path.isdir(cand):
+                    return cand
+        elif sys.platform == "darwin":
+            cand = os.path.expanduser("~/Library/Application Support/Steam")
+            if os.path.isdir(cand):
+                return cand
+        else:
+            cand = os.path.expanduser("~/.steam/steam")
+            if os.path.isdir(cand):
+                return cand
+            cand = os.path.expanduser("~/.local/share/Steam")
+            if os.path.isdir(cand):
+                return cand
+        return None
+
+    @staticmethod
+    def _parse_steam_manifest(path: str):
+        """Pull appid + name from a .acf manifest. Skip Steamworks/redists."""
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            appid_m = re.search(r'"appid"\s*"(\d+)"', content)
+            name_m = re.search(r'"name"\s*"([^"]+)"', content)
+            if not appid_m or not name_m:
+                return None, None
+            appid = appid_m.group(1)
+            name = name_m.group(1).strip()
+            if not name or name.lower() in ("steamworks common redistributables",):
+                return None, None
+            return appid, name
+        except OSError:
+            return None, None
+
+    def _index_epic_games(self, emit: Callable):
+        """Read Epic Games Launcher manifests and emit each installed game."""
+        if sys.platform == "win32":
+            programdata = os.environ.get("PROGRAMDATA", r"C:\ProgramData")
+            manifest_dir = os.path.join(
+                programdata, "Epic", "EpicGamesLauncher", "Data", "Manifests"
+            )
+        elif sys.platform == "darwin":
+            manifest_dir = os.path.expanduser(
+                "~/Library/Application Support/Epic/EpicGamesLauncher/Data/Manifests"
+            )
+        else:
+            manifest_dir = os.path.expanduser(
+                "~/.config/Epic/EpicGamesLauncher/Data/Manifests"
+            )
+        if not os.path.isdir(manifest_dir):
+            return
+
+        try:
+            entries = [f for f in os.listdir(manifest_dir) if f.endswith(".item")]
+        except OSError:
+            return
+
+        import json as _json
+
+        for fname in entries:
+            full = os.path.join(manifest_dir, fname)
+            try:
+                with open(full, "r", encoding="utf-8", errors="ignore") as f:
+                    data = _json.load(f)
+            except (OSError, ValueError):
+                continue
+
+            display = (
+                data.get("DisplayName")
+                or data.get("AppName")
+                or os.path.splitext(fname)[0]
+            )
+            namespace = data.get("CatalogNamespace") or data.get("MainGameCatalogNamespace")
+            item_id = data.get("CatalogItemId") or data.get("MainGameCatalogItemId")
+            app_name = data.get("AppName") or data.get("MainGameAppName")
+            if not (namespace and item_id and app_name):
+                continue
+            launch_url = (
+                f"com.epicgames.launcher://apps/{namespace}%3A{item_id}%3A{app_name}"
+                "?action=launch&silent=true"
+            )
+            if not emit(launch_url, display, "game", "epic", ".epic"):
+                return
+
+    def _index_riot_games(self, emit: Callable):
+        """Best-effort Riot Client games (Valorant, League of Legends)."""
+        if sys.platform != "win32":
+            return
+        candidates = [
+            ("VALORANT", "riotclient://rcp/launch?productId=valorant&patchlineId=live"),
+            ("League of Legends", "riotclient://rcp/launch?productId=league_of_legends&patchlineId=live"),
+        ]
+        # Riot doesn't ship a clean manifest; emit if Riot Client is installed.
+        riot_root = None
+        for env_var in ("PROGRAMFILES", "PROGRAMFILES(X86)"):
+            base = os.environ.get(env_var)
+            if base:
+                cand = os.path.join(base, "Riot Vanguard")
+                cand2 = os.path.join(base, "Riot Games")
+                if os.path.isdir(cand) or os.path.isdir(cand2):
+                    riot_root = cand2 if os.path.isdir(cand2) else cand
+                    break
+        if not riot_root:
+            return
+        for display, url in candidates:
+            if not emit(url, display, "game", "riot", ".riot"):
+                return
 
     def _index_user_folders(self, emit: Callable):
         home = os.path.expanduser("~")

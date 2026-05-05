@@ -60,7 +60,13 @@ class CHAPPIE:
         self.skills.register(CalendarSkill(self.kb, config, llm=self.llm))
         self.skills.register(NotesSkill(self.kb, config, llm=self.llm))
 
-        self.planner = Planner(self.kb, self.parser, self.llm, skills=self.skills)
+        self.planner = Planner(
+            self.kb,
+            self.parser,
+            self.llm,
+            skills=self.skills,
+            llm_first=config.get("planner", {}).get("llm_first", True),
+        )
         self.executor = ExecutionEngine(
             self.kb,
             config,

@@ -82,119 +82,269 @@ ASK_CHATGPT_RX = re.compile(
 PATH_VERBS = r"(?:open|show|browse|view|go\s+to|take\s+me\s+to)"
 
 
-PLANNER_SYSTEM_PROMPT = """You are CHAPPIE's task planner. Output ONE JSON object. Never wrap in markdown.
+PLANNER_SYSTEM_PROMPT = """You are CHAPPIE's planning brain — JARVIS-grade. Your job: convert what the user said into a concrete JSON plan that the executor can run.
 
-Choose ONE shape:
-A) {"steps": [...]}                — executable plan
-B) {"clarify": "<single question>"} — when the request is ambiguous
+Output ONE JSON object only. Never wrap in markdown. No commentary.
 
-When to clarify:
-- Ambiguous names (e.g. "BBS" — which person/channel?)
-- Vague quantities or units ("1 cr" — per year, per semester, total?)
-- Multiple valid interpretations of "newest", "best", "the X video"
-- Action with multiple valid forms
+Two output shapes:
+A) {"steps": [<step>, <step>, ...]}     — executable plan, top to bottom
+B) {"clarify": "<one short question>"}  — when the request is genuinely ambiguous
 
-Make the question short, conversational, propose specific options when useful.
+==================== TOOLS ====================
 
-Available step intents:
-- {"intent":"open_app","target":"<app>"}
+CORE
+- {"intent":"open_app","target":"<app-name>"}
+    Launches an app by name. The agent has a fuzzy file-index covering the
+    user's Start Menu / Applications / installed games — so unusual or
+    branded names ("valorant", "league of legends", "blender") work.
+    Examples of canonical names it knows directly: chrome, firefox, edge,
+    brave, file explorer, vscode, notepad, calculator, cmd, terminal,
+    powershell, word, excel, powerpoint, spotify, discord, slack, steam.
+
+- {"intent":"open_path","target":"<absolute-path-or-special-folder>"}
+    Opens a folder in the file manager.
+    Special-folder names: Downloads, Desktop, Documents, Pictures, Music, Videos.
+    Drive letters: C:\\, D:\\, E:\\.
+
 - {"intent":"open_url","target":"<url>","browser":"<optional>"}
-- {"intent":"open_path","target":"<absolute-path>"}
-- {"intent":"search","target":"<query>"}
-- {"intent":"file_operation","target":"<path>"}
-- {"intent":"system_command","target":"<safe-cmd>"}
-- {"intent":"learn_preference","source":"<key>","target":"<value>"}
-- {"intent":"query_knowledge","target":"<question>"}
+    Open a URL. Add "browser" to use a specific one (chrome/firefox/edge/brave).
+
+- {"intent":"open_file","target":"<filename-or-fragment>"}
+    Open a specific file. Falls back to fuzzy index search by name.
+
+WEB AUTOMATION
 - {"intent":"browser_task","task":"youtube_play","query":"..."}
+    Searches YouTube and plays the first result via Playwright.
+
 - {"intent":"browser_task","task":"chatgpt_ask","question":"..."}
-- {"intent":"greeting"}
+    Opens ChatGPT and submits the question.
 
-Known apps: chrome, firefox, edge, brave, safari, file explorer, notepad, vscode, calculator, cmd, terminal, powershell, word, excel, powerpoint, spotify, discord, slack, steam, vlc, obs.
-Web shortcuts: google, youtube, gmail, github, twitter, reddit, netflix, amazon, wikipedia, chatgpt, claude.
-Special paths: ~/Downloads, ~/Desktop, ~/Documents, ~/Pictures, ~/Music, ~/Videos, C:\\, D:\\.
+GAMES
+- For Steam games, prefer:
+    {"intent":"open_url","target":"steam://rungameid/<appid>"}
+  if you know the appid; otherwise use open_app with the game name —
+  the index will find the Steam/Riot/Epic shortcut.
+- Common appids you may use: 730 (CS2), 271590 (GTA V), 252490 (Rust),
+  578080 (PUBG), 1172470 (Apex Legends), 1086940 (Baldur's Gate 3),
+  1245620 (Elden Ring), 359550 (Rainbow Six Siege).
 
-Rules:
-1. Output ONLY one JSON object. No markdown fences, no explanations.
-2. Steps execute top-to-bottom.
-3. Refuse destructive commands (rm -rf, format, del C:\\*, shutdown, etc.) — emit {"steps": []}.
-4. For multi-step asks, split into atomic steps.
-5. Prefer specific intents (browser_task, open_url) over generic ones.
-6. When a follow-up message starts with "(clarifications: ...)", combine that
-   context with the original request and return steps.
+SKILLS
+- {"intent":"skill","skill":"document","params":{"doc_type":"letter|memo|essay|report","recipient":"<name>","topic":"<topic>"}}
+    Generates a Word document. The skill drafts the body via the LLM and
+    saves to ~/Documents/CHAPPIE.
 
-Examples:
+- {"intent":"skill","skill":"email","params":{"recipient":"<name-or-email>","topic":"<topic>"}}
+    Drafts an email body and opens the user's mail client pre-filled.
 
-"open YouTube and play BBS's newest gaming video"
+- {"intent":"skill","skill":"calendar","params":{"event":"<title>","when":"<natural-time>","who":"<optional>"}}
+    Schedules a calendar event as an .ics file the OS opens in the user's
+    default calendar. "when" can be natural ("tomorrow 7pm", "Friday at 6").
+
+- {"intent":"skill","skill":"notes","params":{"note":"<text>"}}
+    Saves a quick note to KB + ~/Documents/CHAPPIE/notes.md.
+
+KNOWLEDGE
+- {"intent":"learn_preference","source":"<key>","target":"<value>"}
+    Remember a fact about the user. Keys: name, favorite_<x>, contact:<name>.
+
+- {"intent":"query_knowledge","target":"<question>"}
+    Look up something the user previously told CHAPPIE.
+
+CONVERSATION
+- {"intent":"converse","prompt":"<the user's input>"}
+    Use this when the user is asking a general question, chatting, or wants
+    information rather than an action. CHAPPIE will reply with the JARVIS persona.
+
+- {"intent":"greeting"}  (no params)
+    Hi/hello/thanks/bye etc.
+
+==================== RULES ====================
+
+1. Multi-step requests get multi-step plans. "Open Spotify and play Despacito"
+   → 2 steps. "Write a letter to my landlord then schedule a meeting" → 2 steps.
+
+2. For "open <thing>" requests where the thing might be an app, file, or
+   folder on the user's machine: emit ONE open_app step with just the name.
+   The executor's file index handles the resolution. Don't try to guess paths.
+
+3. Use clarify ONLY when the request is genuinely ambiguous — vague unit
+   ("1 cr per year or total?"), an ambiguous proper noun ("which Sarah?"),
+   or multiple equally plausible interpretations. Do NOT clarify just
+   because the request is short — short and clear is fine.
+
+4. For info questions ("what's the weather", "what time is it",
+   "tell me about quantum mechanics"), use converse. Do NOT use
+   browser_task chatgpt_ask just because something is a question.
+
+5. For "play <X>" without context: if X looks like a game, use open_app(X).
+   If X looks like a song/video, use browser_task youtube_play.
+
+6. Refuse destructive system commands (rm -rf, del C:\\*, format, shutdown)
+   by emitting {"steps":[]}.
+
+7. Output JSON. Just JSON. Nothing else.
+
+==================== EXAMPLES ====================
+
+User: "open valorant"
+{"steps":[{"intent":"open_app","target":"valorant"}]}
+
+User: "play valorant"
+{"steps":[{"intent":"open_app","target":"valorant"}]}
+
+User: "let me play CS2 on steam"
+{"steps":[{"intent":"open_url","target":"steam://rungameid/730"}]}
+
+User: "open spotify and play taylor swift's anti-hero"
+{"steps":[{"intent":"open_app","target":"spotify"},{"intent":"browser_task","task":"youtube_play","query":"Taylor Swift Anti-Hero"}]}
+
+User: "write a quick letter to my landlord about a leaky faucet, then schedule a maintenance call for tomorrow at 4pm"
+{"steps":[
+  {"intent":"skill","skill":"document","params":{"doc_type":"letter","recipient":"landlord","topic":"leaky faucet repair request"}},
+  {"intent":"skill","skill":"calendar","params":{"event":"Faucet maintenance call","when":"tomorrow at 4pm","who":"landlord"}}
+]}
+
+User: "open chrome, go to youtube, then play 5 minute crafts newest"
+{"steps":[
+  {"intent":"open_app","target":"chrome"},
+  {"intent":"browser_task","task":"youtube_play","query":"5 minute crafts newest"}
+]}
+
+User: "what's the weather like"
+{"steps":[{"intent":"converse","prompt":"what's the weather like"}]}
+
+User: "what time is it"
+{"steps":[{"intent":"converse","prompt":"what time is it"}]}
+
+User: "open my downloads folder"
+{"steps":[{"intent":"open_path","target":"Downloads"}]}
+
+User: "open disk D"
+{"steps":[{"intent":"open_path","target":"D:\\\\"}]}
+
+User: "play BBS's newest gaming video"
 {"clarify":"Quick check — which BBS? BlackBoxStocks, BeerBiceps, BBS Gaming, or someone else?"}
 
-"open chatgpt and ask about colleges with fees under 1cr"
+User: "best private colleges in delhi with fees under 1cr"
 {"clarify":"Just to confirm — 1 crore total over the program, per year, or per semester?"}
 
-"open chrome and youtube"
-{"steps":[{"intent":"open_app","target":"chrome"},{"intent":"open_url","target":"https://youtube.com"}]}
+User: "remember my email is kartik@example.com"
+{"steps":[{"intent":"learn_preference","source":"email","target":"kartik@example.com"}]}
 
-"open YouTube and play the latest BlackBoxStocks gaming video"
-{"steps":[{"intent":"browser_task","task":"youtube_play","query":"BlackBoxStocks newest gaming video"}]}
+User: "take a note: pick up groceries on the way home"
+{"steps":[{"intent":"skill","skill":"notes","params":{"note":"pick up groceries on the way home"}}]}
 
-"ask chatgpt about the best private colleges in delhi with fees under 1cr per year"
-{"steps":[{"intent":"browser_task","task":"chatgpt_ask","question":"What are the best private colleges in Delhi with fees under 1 crore per year?"}]}
+User: "thanks chappie"
+{"steps":[{"intent":"greeting"}]}
 
-"open YouTube and play BBS's newest gaming video (clarifications: BlackBoxStocks)"
-{"steps":[{"intent":"browser_task","task":"youtube_play","query":"BlackBoxStocks newest gaming video"}]}
+User: "open chatgpt and ask about the best AI model for coding"
+{"steps":[{"intent":"browser_task","task":"chatgpt_ask","question":"What's the best AI model for coding right now?"}]}
 """
 
 
 class Planner:
     """Builds an ordered list of plan steps from natural-language input."""
 
-    def __init__(self, kb, parser: IntentParser, llm: OllamaHandler, skills=None):
+    def __init__(
+        self,
+        kb,
+        parser: IntentParser,
+        llm: OllamaHandler,
+        skills=None,
+        llm_first: bool = True,
+    ):
         self.kb = kb
         self.parser = parser
         self.llm = llm
         self.skills = skills  # SkillRegistry, optional
+        self.llm_first = llm_first
+        # Diagnostics — overwrite per call so /debug/last-plan can read it.
+        self.last_plan_meta: Dict = {}
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     async def plan(self, user_input: str, knowledge_context: str = "") -> List[Dict]:
+        """
+        Default flow with llm_first=True (recommended):
+            1. Trivial fast-paths (greeting, high-confidence preference learn)
+            2. LLM planner with full tool catalog and recent history
+            3. Regex fast-paths as offline fallback
+            4. CONVERSE for anything else
+
+        With llm_first=False (older behaviour):
+            1. All regex fast-paths first
+            2. LLM as last resort
+        """
         text = (user_input or "").strip()
         if not text:
             return []
 
-        # Greeting short-circuit (handled by the parser's own fast-path).
+        meta: Dict = {"input": text, "path": []}
+
+        # Trivial fast-paths that don't need the LLM (greeting, high-confidence
+        # preference learning). Anything subtler goes to the LLM.
         intent = self.parser.parse(text, knowledge_context)
         if intent["type"] == IntentType.GREETING:
+            meta["path"].append("fastpath:greeting")
+            self.last_plan_meta = meta
+            return [self._intent_to_step(intent)]
+        if (
+            intent["type"] == IntentType.LEARN_PREFERENCE
+            and intent["confidence"] >= 0.96
+        ):
+            meta["path"].append("fastpath:learn_preference")
+            self.last_plan_meta = meta
             return [self._intent_to_step(intent)]
 
-        # Browser tasks BEFORE chain split so "open youtube and play X"
-        # stays whole instead of getting split into [open_url, open_app].
+        # PRIMARY path: ask the LLM. It sees the full tool catalog and
+        # recent context, and can produce multi-step plans naturally.
+        if self.llm_first:
+            llm_steps = await self._llm_plan(text, knowledge_context)
+            if llm_steps:
+                meta["path"].append("llm_first")
+                meta["steps"] = [s.get("description") for s in llm_steps]
+                self.last_plan_meta = meta
+                return llm_steps
+            meta["path"].append("llm_first:empty")
+
+        # FALLBACK path: regex fast-paths (works offline / without an LLM).
         browser_steps = self._try_browser_task(text)
         if browser_steps:
+            meta["path"].append("regex:browser_task")
+            self.last_plan_meta = meta
             return browser_steps
 
-        # Skill match (write a letter, schedule X, take a note, ...)
         skill_step = self._try_skill_match(text)
         if skill_step:
+            meta["path"].append("regex:skill")
+            self.last_plan_meta = meta
             return [skill_step]
 
-        # Compound chains so "launch vscode and open my downloads" -> 2 steps.
         chain_steps = self._try_chain(text, knowledge_context)
         if chain_steps and len(chain_steps) > 1:
+            meta["path"].append("regex:chain")
+            self.last_plan_meta = meta
             return chain_steps
 
-        # Single-utterance fast paths.
         single = self._plan_single(text, knowledge_context, fallback_intent=intent)
         if single:
+            meta["path"].append("regex:single")
+            self.last_plan_meta = meta
             return single
 
-        # Last resort: LLM planner.
-        llm_steps = await self._llm_plan(text, knowledge_context)
-        if llm_steps:
-            return llm_steps
+        # If we didn't try the LLM yet (llm_first=False), try it now.
+        if not self.llm_first:
+            llm_steps = await self._llm_plan(text, knowledge_context)
+            if llm_steps:
+                meta["path"].append("llm_fallback")
+                self.last_plan_meta = meta
+                return llm_steps
 
-        # No structured plan possible — fall through to a free conversational
-        # reply. CHAPPIE talks; it doesn't just "I don't understand" at people.
+        # Truly nothing matched — fall through to a free conversational reply.
+        meta["path"].append("converse")
+        self.last_plan_meta = meta
         return [
             {
                 "intent": IntentType.CONVERSE,
@@ -390,20 +540,56 @@ class Planner:
     # ------------------------------------------------------------------
 
     async def _llm_plan(self, text: str, ctx: str) -> List[Dict]:
-        prompt = text
+        # Pull a few recent exchanges so the LLM can resolve pronouns
+        # ("open it again", "no the other one").
+        history_msgs = self._recent_history_messages(limit=4)
+
+        # The user's actual request, with KB context as a prefix the LLM can
+        # consult but won't echo.
+        request = text
         if ctx:
-            prompt = f"# Context (for reference):\n{ctx}\n\n# Request:\n{text}"
+            request = (
+                "# What CHAPPIE knows about this user (reference only):\n"
+                f"{ctx}\n\n# Current request:\n{text}"
+            )
+
+        messages = history_msgs + [{"role": "user", "content": request}]
 
         response = await self.llm.generate(
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             system=PLANNER_SYSTEM_PROMPT,
             temperature=0.1,
         )
         if not response:
-            logger.warning("LLM planner returned empty response (Ollama down?)")
+            logger.warning("LLM planner returned empty response — is the LLM running?")
             return []
 
         return self._parse_llm_response(response)
+
+    def _recent_history_messages(self, limit: int = 4) -> List[Dict]:
+        """Return last <limit> exchanges as alternating user/assistant messages."""
+        try:
+            cursor = self.kb.conn.cursor()
+            cursor.execute(
+                """
+                SELECT user_input, agent_response
+                FROM conversations
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = list(reversed(cursor.fetchall()))
+        except Exception:
+            return []
+
+        msgs: List[Dict] = []
+        for row in rows:
+            if row["user_input"]:
+                msgs.append({"role": "user", "content": row["user_input"]})
+            if row["agent_response"]:
+                msgs.append({"role": "assistant", "content": row["agent_response"]})
+        return msgs
 
     def _parse_llm_response(self, response: str) -> List[Dict]:
         """

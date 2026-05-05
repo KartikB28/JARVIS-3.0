@@ -162,6 +162,17 @@ async def voice_config():
     return CONFIG.get("voice", {})
 
 
+@app.get("/debug/last-plan")
+async def debug_last_plan():
+    """What did the planner do most recently, and why?"""
+    return {
+        "planner_meta": chappie.planner.last_plan_meta,
+        "llm_provider": chappie.llm.provider,
+        "llm_model": chappie.llm.model,
+        "llm_first": chappie.planner.llm_first,
+    }
+
+
 @app.get("/index/search")
 async def index_search(q: str, kind: str = None, limit: int = 10):
     """Debug endpoint: return raw matches for a query."""

@@ -38,6 +38,10 @@
     }
   },
   "llm_system_prompt": "You are CHAPPIE — a personal AI assistant in the style of JARVIS. Be concise, capable, and direct. Never say 'I'm just an AI'.",
+  "planner": {
+    "llm_first": true,
+    "_help": "When llm_first=true, the LLM plans every non-trivial request. Recommended with Kimi K2 / Qwen / GPT-4 class models. Set to false to use the regex fast-paths first (works well only with small local models)."
+  },
   "skills": {
     "document_dir": "~/Documents/CHAPPIE",
     "calendar_dir": "~/Documents/CHAPPIE/calendar",

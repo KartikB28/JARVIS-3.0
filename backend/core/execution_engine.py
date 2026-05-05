@@ -5,6 +5,7 @@ This is 100% Python-based, no LLM involved in execution.
 
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -175,11 +176,33 @@ class ExecutionEngine:
         if web_url:
             return await self._handle_open_url(web_url)
 
-        # 3. Search the file index for a matching app/file/folder.
+        # 3. Search the file index for a matching app/file/folder/game.
         if self.indexer:
             matches = self.indexer.search(cleaned, limit=5)
             if matches:
-                return await self._open_indexed(matches[0])
+                top = matches[0]
+                # Confidence check: if the top match is shaky AND a runner-up
+                # is comparable, ask the user which one to open.
+                if (
+                    top.score < 70
+                    and len(matches) >= 2
+                    and matches[1].score >= top.score - 15
+                    and matches[1].score >= 40
+                ):
+                    options = [m.name for m in matches[:3]]
+                    return {
+                        "success": True,
+                        "action": "clarify",
+                        "question": (
+                            f"I found a few things matching '{cleaned}'. "
+                            f"Which one — {', '.join(options[:-1])}, or {options[-1]}?"
+                        ),
+                        "message": (
+                            f"I found a few things matching '{cleaned}'. "
+                            f"Which one — {', '.join(options[:-1])}, or {options[-1]}?"
+                        ),
+                    }
+                return await self._open_indexed(top)
 
         # 4. Last resort: blind launch via the shell.
         return await self._launch_registered(cleaned)
@@ -229,7 +252,12 @@ class ExecutionEngine:
     async def _open_indexed(self, entry) -> Dict:
         """Open an item that came back from the FileIndexer."""
         path = entry.path
-        if not os.path.exists(path):
+
+        # Game launcher URLs (steam://, com.epicgames.launcher://, riotclient://)
+        # don't exist on disk — open them via the OS URL handler.
+        is_url_scheme = bool(re.match(r"^[a-z][a-z0-9+.-]*://", path or "", re.I))
+
+        if not is_url_scheme and not os.path.exists(path):
             return {
                 "success": False,
                 "action": "open_indexed",
@@ -238,7 +266,9 @@ class ExecutionEngine:
             }
 
         try:
-            if sys.platform == "win32":
+            if is_url_scheme:
+                webbrowser.open(path)
+            elif sys.platform == "win32":
                 # os.startfile handles .lnk shortcuts, .exe, documents, folders.
                 os.startfile(path)  # type: ignore[attr-defined]
             elif sys.platform == "darwin":
@@ -252,6 +282,7 @@ class ExecutionEngine:
             self.kb.track_resource(path, entry.kind)
             self.kb.learn_app_pattern(entry.name.lower(), "open", True)
 
+            location_text = "Steam" if entry.location == "steam" else entry.location
             return {
                 "success": True,
                 "action": "open_indexed",
@@ -259,7 +290,7 @@ class ExecutionEngine:
                 "path": path,
                 "kind": entry.kind,
                 "location": entry.location,
-                "message": f"Opening {entry.name} from {entry.location}...",
+                "message": f"Launching {entry.name} ({location_text}).",
             }
         except Exception as exc:
             return {
