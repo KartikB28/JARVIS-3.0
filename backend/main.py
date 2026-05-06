@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 import asyncio
+import os
 
 from agents.chappie import CHAPPIE
 from models.tts_handler import TTSHandler
@@ -24,6 +25,18 @@ logger = setup_logger(__name__)
 CONFIG_PATH = Path(__file__).parent / "config.json"
 with open(CONFIG_PATH) as f:
     CONFIG = json.load(f)
+
+# When running inside the desktop app, redirect the SQLite DB and the
+# Playwright browser profile to the per-user data directory so the
+# packaged .exe doesn't try to write next to itself.
+_data_override = os.environ.get("CHAPPIE_DATA_DIR")
+if _data_override:
+    CONFIG.setdefault("knowledge_base", {})["db_path"] = os.path.join(
+        _data_override, "chappie.db"
+    )
+    CONFIG.setdefault("browser_automation", {})["user_data_dir"] = os.path.join(
+        _data_override, "browser_profile"
+    )
 
 # The static frontend lives at <repo>/frontend (one level above backend/).
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
