@@ -12,7 +12,7 @@ import sys
 import webbrowser
 from datetime import datetime
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
 from core.app_registry import (
     find_known_app,
@@ -20,6 +20,7 @@ from core.app_registry import (
     get_launch_command,
     strip_fillers,
 )
+from core.deep_search import deep_filesystem_search, rank_results
 from core.intent_parser import IntentType
 from utils.logger import setup_logger
 
@@ -104,6 +105,12 @@ class ExecutionEngine:
                 return await self._handle_skill(params)
             if intent_type == IntentType.CONVERSE:
                 return await self._handle_converse(params, intent)
+            if intent_type == IntentType.FIND_FILE:
+                return await self._handle_find_file(params)
+            if intent_type == IntentType.RUN_SCRIPT:
+                return await self._handle_run_script(params)
+            if intent_type == IntentType.OPEN_WITH:
+                return await self._handle_open_with(params)
 
             return {
                 "success": False,
@@ -181,31 +188,95 @@ class ExecutionEngine:
             matches = self.indexer.search(cleaned, limit=5)
             if matches:
                 top = matches[0]
-                # Confidence check: if the top match is shaky AND a runner-up
-                # is comparable, ask the user which one to open.
-                if (
-                    top.score < 70
-                    and len(matches) >= 2
-                    and matches[1].score >= top.score - 15
-                    and matches[1].score >= 40
-                ):
-                    options = [m.name for m in matches[:3]]
-                    return {
-                        "success": True,
-                        "action": "clarify",
-                        "question": (
+                # Strong: open it.
+                if top.score >= 70:
+                    return await self._open_indexed(top)
+                # Medium: open it if alone, or ask if there's a comparable runner-up.
+                if top.score >= 40:
+                    if (
+                        len(matches) >= 2
+                        and matches[1].score >= top.score - 15
+                        and matches[1].score >= 35
+                    ):
+                        options = [m.name for m in matches[:3]]
+                        msg = (
                             f"I found a few things matching '{cleaned}'. "
                             f"Which one — {', '.join(options[:-1])}, or {options[-1]}?"
-                        ),
-                        "message": (
-                            f"I found a few things matching '{cleaned}'. "
-                            f"Which one — {', '.join(options[:-1])}, or {options[-1]}?"
-                        ),
-                    }
-                return await self._open_indexed(top)
+                        )
+                        return {
+                            "success": True,
+                            "action": "clarify",
+                            "question": msg,
+                            "message": msg,
+                        }
+                    return await self._open_indexed(top)
+                # Weak: fall through to deep search.
 
-        # 4. Last resort: blind launch via the shell.
+        # 4. NEW: deep on-demand filesystem search.
+        # Walks the disk natively (dir /s on Windows, find on Unix). This
+        # is what makes "open valorant", "open my-secret-script.py", "open
+        # that random text file" actually work.
+        deep = await deep_filesystem_search(cleaned, kind="any", limit=10, timeout=8)
+        if deep:
+            ranked = rank_results(cleaned, deep)
+            top = ranked[0]
+            # Top is a strong match (name == query or starts with) → open it.
+            top_name = os.path.splitext(os.path.basename(top))[0].lower()
+            if top_name == cleaned.lower() or top_name.startswith(cleaned.lower()):
+                return await self._open_path_directly(top)
+
+            # Otherwise multiple weak matches → ask the user.
+            options = [os.path.basename(p) for p in ranked[:5]]
+            return {
+                "success": True,
+                "action": "clarify",
+                "question": (
+                    f"I dug through your machine and found a few candidates for '{cleaned}'. "
+                    f"Which one — {', '.join(options[:-1])}, or {options[-1]}?"
+                ),
+                "message": (
+                    f"I dug through your machine and found a few candidates for '{cleaned}'. "
+                    f"Which one — {', '.join(options[:-1])}, or {options[-1]}?"
+                ),
+                "candidates": ranked[:5],
+            }
+
+        # 5. Last resort: blind launch via the shell.
         return await self._launch_registered(cleaned)
+
+    async def _open_path_directly(self, path: str) -> Dict:
+        """Open whatever's at `path` using the OS default opener."""
+        try:
+            ext = os.path.splitext(path)[1].lower()
+            name = os.path.basename(path)
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+
+            kind = "folder" if os.path.isdir(path) else (
+                "app" if ext in (".lnk", ".exe", ".app", ".desktop") else "file"
+            )
+            self.kb.track_resource(path, kind)
+            return {
+                "success": True,
+                "action": "open_indexed",
+                "name": name,
+                "path": path,
+                "kind": kind,
+                "location": "deep_search",
+                "message": f"Opening {name}.",
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "action": "open_indexed",
+                "path": path,
+                "error": str(exc),
+                "message": f"Found it but couldn't open: {exc}",
+            }
 
     async def _launch_registered(self, canonical: str) -> Dict:
         """Launch a name through the OS shell (uses registry command if known)."""
@@ -701,6 +772,237 @@ class ExecutionEngine:
             "question": question,
             "message": question,
         }
+
+    async def _handle_find_file(self, params: Dict) -> Dict:
+        """Deep filesystem search for files/folders by name, optionally
+        constrained by extension or starting directory."""
+        query = (params.get("query") or params.get("target") or "").strip()
+        if not query:
+            return {
+                "success": False,
+                "action": "find_file",
+                "error": "no_query",
+                "message": "What should I look for?",
+            }
+        kind = (params.get("kind") or "any").lower()
+        if kind not in ("any", "file", "folder"):
+            kind = "any"
+        extensions = params.get("extensions") or None
+        roots = params.get("roots") or None
+        if isinstance(roots, str):
+            roots = [roots]
+
+        # Try the index first — instant.
+        index_hits: List[str] = []
+        if self.indexer:
+            matches = self.indexer.search(query, limit=10)
+            for m in matches:
+                if kind == "any" or (
+                    kind == "folder" and m.kind == "folder"
+                ) or (kind == "file" and m.kind in ("file", "app", "game")):
+                    index_hits.append(m.path)
+
+        # Then deep search on disk (with timeout).
+        deep_hits = await deep_filesystem_search(
+            query,
+            roots=roots,
+            kind=kind,
+            extensions=extensions,
+            limit=20,
+            timeout=10,
+        )
+
+        all_hits = list(dict.fromkeys(index_hits + deep_hits))
+        ranked = rank_results(query, all_hits)
+        if not ranked:
+            return {
+                "success": False,
+                "action": "find_file",
+                "query": query,
+                "message": f"I couldn't find anything matching '{query}'.",
+            }
+
+        # If the query has an unambiguous best match, return it; otherwise
+        # return the list and let the user / next planner step decide.
+        return {
+            "success": True,
+            "action": "find_file",
+            "query": query,
+            "results": ranked[:10],
+            "message": (
+                f"Found {len(ranked)} match{'es' if len(ranked) != 1 else ''}: "
+                + ", ".join(os.path.basename(p) for p in ranked[:3])
+                + ("..." if len(ranked) > 3 else "")
+            ),
+        }
+
+    async def _handle_run_script(self, params: Dict) -> Dict:
+        """Execute a code file in its native interpreter."""
+        target = (params.get("target") or params.get("file") or "").strip()
+        if not target:
+            return {
+                "success": False,
+                "action": "run_script",
+                "message": "Which file should I run?",
+            }
+
+        # Resolve the path — accept absolute, ~ expansion, or fuzzy by name.
+        path = os.path.expanduser(os.path.expandvars(target))
+        if not os.path.exists(path):
+            # Try the index
+            if self.indexer:
+                matches = self.indexer.search(target, kind="file", limit=3)
+                if matches:
+                    path = matches[0].path
+
+        if not os.path.exists(path):
+            # Deep search as last resort
+            deep = await deep_filesystem_search(
+                target, kind="file", limit=5, timeout=6
+            )
+            ranked = rank_results(target, deep)
+            if ranked:
+                path = ranked[0]
+
+        if not os.path.exists(path):
+            return {
+                "success": False,
+                "action": "run_script",
+                "message": f"I couldn't find a file named '{target}'.",
+            }
+
+        ext = os.path.splitext(path)[1].lower()
+        runner_for_ext = {
+            ".py": ["python", path],
+            ".js": ["node", path],
+            ".mjs": ["node", path],
+            ".ts": ["npx", "tsx", path],
+            ".rb": ["ruby", path],
+            ".go": ["go", "run", path],
+            ".rs": ["cargo", "run", "--manifest-path", path],
+            ".sh": ["bash", path],
+            ".ps1": ["powershell", "-File", path],
+            ".bat": [path],
+            ".cmd": [path],
+            ".exe": [path],
+            ".jar": ["java", "-jar", path],
+            ".php": ["php", path],
+        }
+        cmd = runner_for_ext.get(ext)
+        if not cmd:
+            # Unknown extension — try shell open
+            return await self._open_path_directly(path)
+
+        # Run in the file's directory so relative paths inside it work.
+        cwd = os.path.dirname(os.path.abspath(path)) or None
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                creationflags=(
+                    subprocess.CREATE_NEW_CONSOLE
+                    if sys.platform == "win32" and ext in (".bat", ".cmd", ".exe", ".ps1")
+                    else 0
+                ),
+            )
+            self.kb.track_resource(path, "script_run")
+            return {
+                "success": True,
+                "action": "run_script",
+                "path": path,
+                "pid": proc.pid,
+                "interpreter": cmd[0],
+                "message": f"Running {os.path.basename(path)}.",
+            }
+        except FileNotFoundError:
+            return {
+                "success": False,
+                "action": "run_script",
+                "path": path,
+                "error": "interpreter_missing",
+                "message": (
+                    f"I need {cmd[0]!r} on PATH to run {ext} files. "
+                    f"Install it or run the file directly."
+                ),
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "action": "run_script",
+                "path": path,
+                "error": str(exc),
+                "message": f"Couldn't run that script: {exc}",
+            }
+
+    async def _handle_open_with(self, params: Dict) -> Dict:
+        """Open a file/folder in a specific application."""
+        target = (params.get("target") or params.get("file") or "").strip()
+        app = (params.get("app") or params.get("with") or "").strip()
+        if not target or not app:
+            return {
+                "success": False,
+                "action": "open_with",
+                "message": "Tell me both the file and the app.",
+            }
+
+        # Resolve target file (literal path → index → deep search)
+        path = os.path.expanduser(os.path.expandvars(target))
+        if not os.path.exists(path):
+            if self.indexer:
+                matches = self.indexer.search(target, limit=3)
+                if matches:
+                    path = matches[0].path
+        if not os.path.exists(path):
+            deep = await deep_filesystem_search(target, kind="any", limit=3, timeout=6)
+            ranked = rank_results(target, deep)
+            if ranked:
+                path = ranked[0]
+
+        if not os.path.exists(path):
+            return {
+                "success": False,
+                "action": "open_with",
+                "message": f"I couldn't find '{target}' to open.",
+            }
+
+        # Resolve the app name to a launch command.
+        canonical = find_known_app(app) or app.lower()
+        app_cmd = get_launch_command(canonical)
+
+        try:
+            if sys.platform == "win32":
+                if app_cmd and app_cmd.startswith("start "):
+                    binary = app_cmd[len("start ") :].strip()
+                    subprocess.Popen(f'start "" "{binary}" "{path}"', shell=True)
+                else:
+                    subprocess.Popen(f'start "" "{canonical}" "{path}"', shell=True)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-a", canonical, path])
+            else:
+                subprocess.Popen([canonical, path])
+            self.kb.track_resource(path, "file")
+            return {
+                "success": True,
+                "action": "open_with",
+                "path": path,
+                "app": canonical,
+                "message": f"Opening {os.path.basename(path)} in {canonical}.",
+            }
+        except FileNotFoundError:
+            return {
+                "success": False,
+                "action": "open_with",
+                "message": f"Couldn't launch {canonical}. Is it installed?",
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "action": "open_with",
+                "error": str(exc),
+                "message": f"Couldn't open {os.path.basename(path)} in {canonical}: {exc}",
+            }
 
     async def _handle_skill(self, params: Dict) -> Dict:
         """Dispatch to a registered skill by name."""

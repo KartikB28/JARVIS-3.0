@@ -112,6 +112,22 @@ CORE
 - {"intent":"open_file","target":"<filename-or-fragment>"}
     Open a specific file. Falls back to fuzzy index search by name.
 
+- {"intent":"find_file","query":"<name>","kind":"any|file|folder","extensions":["py","docx"]}
+    Deep filesystem search. Walks the disk natively to find anything no
+    matter how deep — code files, secret docs, hidden folders. Use this
+    when the user wants to LOCATE something rather than open it directly,
+    or when an open_app failed and you want to surface options.
+
+- {"intent":"run_script","target":"<filename-or-path>"}
+    Execute a code file in the right interpreter — .py via python, .js
+    via node, .sh via bash, .ps1 via powershell, .bat/.cmd directly,
+    .jar via java, etc. Resolves the path through index + deep search
+    if needed.
+
+- {"intent":"open_with","target":"<file-or-fragment>","app":"<app>"}
+    Open a specific file in a specific app. e.g., open this PDF in
+    Chrome, open this folder in VSCode, open this image in Paint.
+
 WEB AUTOMATION
 - {"intent":"browser_task","task":"youtube_play","query":"..."}
     Searches YouTube and plays the first result via Playwright.
@@ -239,6 +255,43 @@ User: "thanks chappie"
 
 User: "open chatgpt and ask about the best AI model for coding"
 {"steps":[{"intent":"browser_task","task":"chatgpt_ask","question":"What's the best AI model for coding right now?"}]}
+
+User: "find my python file called fibonacci"
+{"steps":[{"intent":"find_file","query":"fibonacci","kind":"file","extensions":["py"]}]}
+
+User: "run my fibonacci python script"
+{"steps":[{"intent":"run_script","target":"fibonacci"}]}
+
+User: "find my resume anywhere on the computer"
+{"steps":[{"intent":"find_file","query":"resume","kind":"file"}]}
+
+User: "open this txt file in vscode" (with context: txt = "notes.txt")
+{"steps":[{"intent":"open_with","target":"notes.txt","app":"vscode"}]}
+
+User: "open my game-dev project in vs code"
+{"steps":[{"intent":"open_with","target":"game-dev","app":"vscode"}]}
+
+User: "find my screenshots folder"
+{"steps":[{"intent":"find_file","query":"screenshots","kind":"folder"}]}
+
+User: "search the whole pc for files with valorant in their name"
+{"steps":[{"intent":"find_file","query":"valorant","kind":"any"}]}
+
+User: "open the readme in my python project"
+{"steps":[{"intent":"find_file","query":"README","kind":"file","extensions":["md","txt"]}]}
+
+User: "play the song doomsday by mf doom on youtube"
+{"steps":[{"intent":"browser_task","task":"youtube_play","query":"Doomsday MF DOOM"}]}
+
+User: "watch the latest mkbhd video on youtube"
+{"steps":[{"intent":"browser_task","task":"youtube_play","query":"MKBHD newest"}]}
+
+User: "open notepad and chrome and vscode"
+{"steps":[
+  {"intent":"open_app","target":"notepad"},
+  {"intent":"open_app","target":"chrome"},
+  {"intent":"open_app","target":"vscode"}
+]}
 """
 
 

@@ -56,6 +56,25 @@ class ResponseGenerator:
         if action == "browser_task":
             return execution_result.get("message", "Done.")
 
+        if action == "find_file":
+            results = execution_result.get("results", [])
+            if not results:
+                return execution_result.get(
+                    "message",
+                    f"I couldn't find anything matching '{execution_result.get('query', 'that')}'.",
+                )
+            preview = "\n".join(f"  • {r}" for r in results[:5])
+            return (
+                f"Found {len(results)} match{'es' if len(results) != 1 else ''}:\n{preview}"
+                + ("\n  …" if len(results) > 5 else "")
+            )
+
+        if action == "run_script":
+            return execution_result.get("message", "Script started.")
+
+        if action == "open_with":
+            return execution_result.get("message", "Opened.")
+
         if action == "skill":
             return execution_result.get("message", "Done.")
 

@@ -25,18 +25,24 @@ logger = setup_logger(__name__)
 
 
 # ----- Build limits (keep the index small, fast, and signal-rich) -----
-MAX_TOTAL_ENTRIES = 50_000
-MAX_PER_LOCATION = 5_000
-MAX_DEPTH_DEFAULT = 3
+# These are intentionally generous so CHAPPIE can find anything on a
+# typical user's machine. SQLite can take it.
+MAX_TOTAL_ENTRIES = 500_000
+MAX_PER_LOCATION = 50_000
+MAX_DEPTH_DEFAULT = 6
 
 # Skip these directory names anywhere we encounter them.
 SKIP_DIR_NAMES = {
     "node_modules", ".git", ".hg", ".svn",
-    "venv", ".venv", "env", ".env",
+    "venv", ".venv", "env",
     "__pycache__", ".pytest_cache",
     ".cache", ".npm", ".gradle", ".m2",
-    "AppData", "$Recycle.Bin", "System Volume Information",
+    "$Recycle.Bin", "System Volume Information",
     "build", "dist", "target", "out",
+    # Windows OS clutter we don't want to index from C:\Windows
+    "winsxs", "DriverStore", "servicing", "assembly",
+    # Browser caches
+    "Cache", "Code Cache", "GPUCache", "Service Worker",
 }
 
 # Skip files with these extensions — they're rarely what a user means.
@@ -44,7 +50,9 @@ SKIP_EXTENSIONS = {
     ".tmp", ".log", ".bak", ".swp", ".swo",
     ".cache", ".lock",
     ".db", ".db-wal", ".db-shm", ".db-journal",
-    ".pyc", ".pyo", ".class", ".o",
+    ".pyc", ".pyo", ".class", ".o", ".obj",
+    ".dll", ".so", ".dylib", ".sys", ".drv",
+    ".manifest", ".cat",
 }
 
 
@@ -427,19 +435,63 @@ class FileIndexer:
 
     def _index_user_folders(self, emit: Callable):
         home = os.path.expanduser("~")
+        # Cross-platform user folders (deeper than before so CHAPPIE can find
+        # files buried in subfolders).
         targets = [
-            ("Desktop", "desktop", 2),
-            ("Documents", "documents", MAX_DEPTH_DEFAULT),
-            ("Downloads", "downloads", 2),
-            ("Pictures", "pictures", 2),
-            ("Videos", "videos", 2),
-            ("Music", "music", 2),
+            ("Desktop", "desktop", 4),
+            ("Documents", "documents", 6),
+            ("Downloads", "downloads", 4),
+            ("Pictures", "pictures", 4),
+            ("Videos", "videos", 4),
+            ("Music", "music", 4),
+            ("OneDrive", "onedrive", 5),
+            ("Dropbox", "dropbox", 5),
+            ("Projects", "projects", 6),
+            ("Code", "code", 6),
+            ("source", "source", 6),
+            ("repos", "repos", 6),
         ]
         for name, location, depth in targets:
             base = os.path.join(home, name)
             if not os.path.isdir(base):
                 continue
             self._walk_folder(base, depth, location, emit)
+
+        # Windows-specific: AppData/Local/Programs is where many "modern"
+        # installers drop apps (Slack, Discord, GitHub Desktop, Cursor, ...).
+        if sys.platform == "win32":
+            extra_roots = []
+            local_app = os.environ.get("LOCALAPPDATA")
+            if local_app:
+                extra_roots.append(
+                    (os.path.join(local_app, "Programs"), "local_programs", 4)
+                )
+                extra_roots.append((local_app, "local_appdata", 3))
+            for env_var, label in (
+                ("PROGRAMFILES", "program_files"),
+                ("PROGRAMFILES(X86)", "program_files_x86"),
+            ):
+                base = os.environ.get(env_var)
+                if base:
+                    extra_roots.append((base, label, 4))
+            for path, label, depth in extra_roots:
+                if os.path.isdir(path):
+                    self._walk_folder(path, depth, label, emit)
+        elif sys.platform == "darwin":
+            for path, label, depth in (
+                ("/Applications", "applications", 2),
+                (os.path.expanduser("~/Library/Containers"), "containers", 2),
+            ):
+                if os.path.isdir(path):
+                    self._walk_folder(path, depth, label, emit)
+        else:  # Linux
+            for path, label, depth in (
+                ("/usr/local/bin", "usr_local_bin", 1),
+                (os.path.expanduser("~/.local/bin"), "local_bin", 1),
+                ("/opt", "opt", 3),
+            ):
+                if os.path.isdir(path):
+                    self._walk_folder(path, depth, label, emit)
 
     def _walk_folder(self, base: str, max_depth: int, location: str, emit: Callable):
         base_depth = base.rstrip(os.sep).count(os.sep)

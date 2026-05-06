@@ -182,11 +182,12 @@ class CHAPPIE:
             result = await self.executor.execute(intent_dict)
             result.setdefault("original_input", user_input)
             results.append(result)
-            if (
-                not result.get("success")
-                and result.get("action") != "clarification_needed"
-            ):
+
+            # If a CLARIFY came back mid-plan, halt so we can ask the user.
+            if result.get("action") == "clarify":
                 break
+            # Otherwise keep going even on failures — partial success is
+            # better than aborting the whole chain because step 1 missed.
 
         response = await self.response_gen.generate_multi(
             results, knowledge_context, original_query or user_input
